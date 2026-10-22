@@ -1,0 +1,1178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Moiré Exploré</title>
+<style>
+  :root {
+    --panel-bg: rgba(16, 18, 24, .93);
+    --fg: #e8e9ef;
+    --muted: #9aa0ad;
+    --accent: #8fb0ff;
+    --line: rgba(255, 255, 255, .1);
+    --card: rgba(255, 255, 255, .045);
+    --input: rgba(255, 255, 255, .08);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden; background: #fff;
+    font: 13px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--fg);
+  }
+  #stage, #overlay { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  #overlay { touch-action: none; cursor: grab; mix-blend-mode: difference; }
+  #overlay.dragging { cursor: grabbing; }
+  #overlay.tool-path { cursor: crosshair; }
+
+  #panel {
+    position: fixed; top: 0; left: 0; bottom: 0; width: 340px; z-index: 2;
+    background: var(--panel-bg); backdrop-filter: blur(8px);
+    border-right: 1px solid var(--line); overflow-y: auto; padding: 14px 14px 48px;
+    transition: transform .25s ease;
+  }
+  #panel.hidden { transform: translateX(-105%); }
+  #panel h1 { font-size: 20px; margin: 0 0 2px; letter-spacing: .02em; }
+  #panel .sub { color: var(--muted); margin: 0 0 12px; }
+
+  details { background: var(--card); border: 1px solid var(--line); border-radius: 10px; margin: 0 0 10px; }
+  summary { cursor: pointer; padding: 9px 12px; font-weight: 600; list-style: none; display: flex; align-items: center; gap: 8px; }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: "▸"; color: var(--muted); transition: transform .15s; }
+  details[open] > summary::before { transform: rotate(90deg); }
+  summary .swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid var(--line); margin-left: auto; }
+  .body { padding: 2px 12px 12px; }
+
+  .row { display: grid; grid-template-columns: 104px 1fr 62px; gap: 8px; align-items: center; margin: 6px 0; }
+  .row > span { color: var(--muted); }
+  .row select, .row .wide { grid-column: span 2; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  input.num, select, input[type=color] {
+    width: 100%; background: var(--input); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px 6px; font: inherit;
+  }
+  select option { background: #1b1e26; }
+  input[type=color] { height: 28px; padding: 2px; }
+  .check { display: flex; align-items: center; gap: 8px; margin: 6px 0; color: var(--fg); cursor: pointer; }
+  .check input { accent-color: var(--accent); }
+
+  button {
+    background: var(--input); color: var(--fg); border: 1px solid var(--line); border-radius: 7px;
+    padding: 6px 10px; font: inherit; cursor: pointer;
+  }
+  button:hover { background: rgba(255, 255, 255, .14); }
+  button.primary { background: #3a5bd9; border-color: #5577ee; }
+  .seg { display: flex; gap: 0; margin: 6px 0; }
+  .seg button { flex: 1; border-radius: 0; border-right-width: 0; }
+  .seg button:first-child { border-radius: 7px 0 0 7px; }
+  .seg button:last-child { border-radius: 0 7px 7px 0; border-right-width: 1px; }
+  .seg button.active { background: #3a5bd9; border-color: #5577ee; }
+  .btns { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 2px; }
+  .hint { color: var(--muted); font-size: 12px; margin: 6px 0; }
+  .hint kbd { background: var(--input); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; font: 11px ui-monospace, monospace; }
+  .label { color: var(--muted); margin: 10px 0 2px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+
+  .keys { display: grid; grid-template-columns: 1fr 1fr 30px; gap: 6px; align-items: center; margin: 4px 0; }
+  .keys .head { color: var(--muted); font-size: 12px; }
+
+  #fab { position: fixed; top: 10px; right: 10px; z-index: 4; display: flex; gap: 6px; }
+  #fab button { background: rgba(16, 18, 24, .85); min-width: 38px; height: 36px; backdrop-filter: blur(6px); }
+
+  #editor {
+    position: fixed; top: 56px; right: 10px; z-index: 3; width: 380px; max-width: calc(100vw - 20px);
+    max-height: calc(100vh - 66px); overflow-y: auto; background: var(--panel-bg); backdrop-filter: blur(8px);
+    border: 1px solid var(--line); border-radius: 12px; padding: 12px;
+  }
+  #editor[hidden] { display: none; }
+  #editor header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .edWrap { position: relative; width: 100%; aspect-ratio: 1; margin: 8px 0; border-radius: 4px; overflow: hidden;
+    background: #fff; outline: 1px dashed rgba(255, 255, 255, .4); }
+  .edWrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+  #edPreview { pointer-events: none; }
+
+  @media (max-width: 700px) {
+    #panel { top: auto; width: 100%; height: 54vh; border-right: 0; border-top: 1px solid var(--line); }
+    #panel.hidden { transform: translateY(105%); }
+    #editor { top: 52px; right: 10px; left: 10px; width: auto; max-height: 44vh; }
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<canvas id="overlay"></canvas>
+
+<div id="fab">
+  <button id="fabPlay" title="Play / pause animation (Space)">❚❚</button>
+  <button id="fabPanel" title="Show / hide controls (H)">☰</button>
+</div>
+
+<aside id="panel">
+  <h1>Moiré Exploré</h1>
+  <p class="sub">Overlay two patterns and watch interference emerge.</p>
+
+  <details open id="layer0"></details>
+  <details open id="layer1"></details>
+
+  <details>
+    <summary>Composite</summary>
+    <div class="body">
+      <div class="row"><span>Background</span><input type="color" id="bg" class="wide"></div>
+      <div class="row"><span>Blend mode</span>
+        <select id="blend">
+          <option value="source-over">Normal</option>
+          <option value="multiply">Multiply</option>
+          <option value="screen">Screen</option>
+          <option value="difference">Difference</option>
+          <option value="exclusion">Exclusion</option>
+          <option value="overlay">Overlay</option>
+          <option value="darken">Darken</option>
+          <option value="lighten">Lighten</option>
+        </select>
+      </div>
+      <div class="btns"><button id="swap">⇅ Swap A / B</button></div>
+    </div>
+  </details>
+
+  <details open>
+    <summary>Move &amp; rotate</summary>
+    <div class="body">
+      <div class="label">Moving layer</div>
+      <div class="seg" id="movingSeg"></div>
+      <div class="label">Tool</div>
+      <div class="seg" id="toolSeg"></div>
+      <div id="motionSliders"></div>
+      <div class="btns"><button id="resetPose">Reset position</button></div>
+      <p class="hint">
+        Drag to move · <kbd>Shift</kbd>/right-drag or wheel to rotate (<kbd>Shift</kbd>+wheel fine) ·
+        <kbd>Ctrl</kbd>+wheel or pinch to scale · <kbd>[</kbd> <kbd>]</kbd> nudge angle · arrows nudge position.
+      </p>
+    </div>
+  </details>
+
+  <details open>
+    <summary>Animation</summary>
+    <div class="body">
+      <div class="row"><span>Preset</span><select id="animMode"></select></div>
+      <div id="animParams"></div>
+      <div id="pathBox"></div>
+      <label class="check"><input type="checkbox" id="counter"> Counter-move the other layer</label>
+      <div class="btns">
+        <button id="play" class="primary">Pause</button>
+        <button id="restart">Restart</button>
+      </div>
+    </div>
+  </details>
+
+  <details>
+    <summary>View</summary>
+    <div class="body">
+      <label class="check"><input type="checkbox" id="guides" checked> Show guides (centre, path)</label>
+      <div class="btns"><button id="snapshot">⤓ Save PNG</button></div>
+      <p class="hint"><kbd>Space</kbd> play/pause · <kbd>H</kbd> hide panel · <kbd>G</kbd> guides ·
+        <kbd>1</kbd>/<kbd>2</kbd> pick layer · <kbd>M</kbd>/<kbd>R</kbd>/<kbd>P</kbd> tools · <kbd>0</kbd> reset.</p>
+    </div>
+  </details>
+</aside>
+
+<div id="editor" hidden>
+  <header><strong>Draw pattern <span id="edLayer">B</span></strong><button id="edClose" title="Close (Esc)">✕</button></header>
+  <div class="seg" id="edToolSeg"></div>
+  <div id="edSliders"></div>
+  <label class="check"><input type="checkbox" id="edErase"> Eraser</label>
+  <label class="check"><input type="checkbox" id="edFill"> Filled shapes</label>
+  <label class="check"><input type="checkbox" id="edMx"> Mirror left ↔ right</label>
+  <label class="check"><input type="checkbox" id="edMy"> Mirror top ↕ bottom</label>
+  <label class="check"><input type="checkbox" id="edWrap" checked> Wrap edges (seamless tile)</label>
+  <div class="edWrap"><canvas id="edCanvas" width="512" height="512"></canvas><canvas id="edPreview" width="512" height="512"></canvas></div>
+  <div class="btns">
+    <button id="edUndo">↶ Undo</button>
+    <button id="edClear">Clear</button>
+    <button id="edFillAll">Fill</button>
+    <button id="edInvert">Invert</button>
+  </div>
+  <p class="hint">Black areas become the layer's coloured, opaque parts. Tile size and repeat mode are set in the layer's panel. The canvas behind updates as you draw.</p>
+</div>
+
+<script>
+'use strict';
+const DEG = Math.PI / 180, TAU = Math.PI * 2;
+const $ = s => document.querySelector(s);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const normDeg = a => ((a + 180) % 360 + 360) % 360 - 180;
+const wrapRad = a => Math.atan2(Math.sin(a), Math.cos(a));
+
+function h(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') e.className = v;
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else if (v === true) e.setAttribute(k, '');
+    else if (v !== false && v != null) e.setAttribute(k, v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) e.append(c.nodeType ? c : document.createTextNode(c));
+  return e;
+}
+
+function mulberry32(a) {
+  return () => {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Pattern presets.
+ * Vector presets draw(ctx, R, p, scale) in layer-local coordinates,
+ * covering a disc of radius R around the origin.
+ * Tile presets give a period size(p) -> [w, h] (local px) and draw one
+ * tile of Tw x Th device px; the tile is repeated with a canvas pattern.
+ * ------------------------------------------------------------------ */
+const P = (k, label, min, max, step, def, unit = '') => ({ k, label, min, max, step, def, unit });
+const weightP = (def = 50) => P('weight', 'Line weight', 5, 95, 1, def, '%');
+
+const PRESETS = {
+  lines: {
+    name: 'Parallel lines',
+    params: [P('spacing', 'Spacing', 2, 80, 0.1, 8, 'px'), weightP()],
+    draw(ctx, R, p) {
+      const s = p.spacing, w = s * p.weight / 100, n = Math.ceil(R / s) + 1;
+      ctx.beginPath();
+      for (let i = -n; i <= n; i++) ctx.rect(i * s - w / 2, -R, w, 2 * R);
+      ctx.fill();
+    },
+  },
+  grid: {
+    name: 'Square grid',
+    params: [P('spacing', 'Spacing', 2, 80, 0.1, 10, 'px'), weightP(25)],
+    draw(ctx, R, p) {
+      const s = p.spacing, w = s * p.weight / 100, n = Math.ceil(R / s) + 1;
+      ctx.beginPath();
+      for (let i = -n; i <= n; i++) { ctx.rect(i * s - w / 2, -R, w, 2 * R); ctx.rect(-R, i * s - w / 2, 2 * R, w); }
+      ctx.fill();
+    },
+  },
+  circles: {
+    name: 'Concentric circles',
+    params: [P('spacing', 'Ring spacing', 2, 80, 0.1, 10, 'px'), weightP()],
+    draw(ctx, R, p) {
+      const s = p.spacing, w = s * p.weight / 100, n = Math.ceil(R / s) + 1;
+      ctx.beginPath();
+      for (let i = 0; i <= n; i++) {
+        const ri = i * s - w / 2, ro = i * s + w / 2;
+        if (ri > 0) { ctx.moveTo(ri, 0); ctx.arc(0, 0, ri, 0, TAU); }
+        ctx.moveTo(ro, 0); ctx.arc(0, 0, ro, 0, TAU);
+      }
+      ctx.fill('evenodd');
+    },
+  },
+  radial: {
+    name: 'Radial spokes',
+    params: [P('spokes', 'Spokes', 4, 720, 1, 120), weightP()],
+    draw(ctx, R, p) {
+      const n = Math.round(p.spokes), hw = Math.PI / n * p.weight / 100;
+      ctx.beginPath();
+      for (let i = 0; i < n; i++) {
+        const a = i * TAU / n;
+        ctx.moveTo(0, 0); ctx.arc(0, 0, R, a - hw, a + hw); ctx.closePath();
+      }
+      ctx.fill();
+    },
+  },
+  spiral: {
+    name: 'Spiral',
+    params: [P('arms', 'Arms', 1, 12, 1, 1), P('spacing', 'Spacing', 2, 60, 0.1, 10, 'px'), weightP()],
+    draw(ctx, R, p) {
+      const arms = Math.round(p.arms), s = p.spacing, k = s * arms / TAU, thMax = (R + s) / k;
+      ctx.lineWidth = s * p.weight / 100; ctx.lineJoin = 'round';
+      ctx.beginPath();
+      for (let a = 0; a < arms; a++) {
+        const ph = a * TAU / arms;
+        let th = 0; ctx.moveTo(0, 0);
+        while (th < thMax) {
+          th += Math.min(0.25, Math.sqrt(2 / Math.max(k * th, 1)));
+          const r = k * th;
+          ctx.lineTo(r * Math.cos(th + ph), r * Math.sin(th + ph));
+        }
+      }
+      ctx.stroke();
+    },
+  },
+  zone: {
+    name: 'Zone plate (chirp rings)',
+    params: [P('scale', 'Zone scale', 4, 80, 0.1, 18, 'px'), weightP()],
+    draw(ctx, R, p, sc) {
+      const z = p.scale, w = p.weight / 100;
+      ctx.beginPath();
+      for (let m = 0; m < 20000; m++) {
+        const ri = z * Math.sqrt(2 * m), ro = z * Math.sqrt(2 * (m + w));
+        if (ri > R) break;
+        if (m > 0 && (z * z / ri) * sc < 1) break; // rings finer than a pixel: stop
+        if (ri > 0) { ctx.moveTo(ri, 0); ctx.arc(0, 0, ri, 0, TAU); }
+        ctx.moveTo(ro, 0); ctx.arc(0, 0, ro, 0, TAU);
+      }
+      ctx.fill('evenodd');
+    },
+  },
+  dots: {
+    name: 'Dot grid',
+    params: [P('spacing', 'Spacing', 3, 80, 0.1, 10, 'px'), P('size', 'Dot size', 5, 100, 1, 50, '%')],
+    size: p => [p.spacing, p.spacing],
+    drawTile(ctx, Tw, Th, p) {
+      ctx.beginPath(); ctx.arc(Tw / 2, Th / 2, Tw / 2 * p.size / 100, 0, TAU); ctx.fill();
+    },
+  },
+  hex: {
+    name: 'Hexagonal dots',
+    params: [P('spacing', 'Spacing', 3, 80, 0.1, 10, 'px'), P('size', 'Dot size', 5, 100, 1, 50, '%')],
+    size: p => [p.spacing, p.spacing * Math.sqrt(3)],
+    drawTile(ctx, Tw, Th, p) {
+      const r = Tw / 2 * p.size / 100;
+      ctx.beginPath();
+      for (const [x, y] of [[Tw / 2, Th / 2], [0, 0], [Tw, 0], [0, Th], [Tw, Th]]) { ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, TAU); }
+      ctx.fill();
+    },
+  },
+  checker: {
+    name: 'Checkerboard',
+    params: [P('spacing', 'Square size', 2, 80, 0.1, 8, 'px')],
+    size: p => [p.spacing * 2, p.spacing * 2],
+    drawTile(ctx, Tw, Th) {
+      ctx.fillRect(0, 0, Tw / 2, Th / 2); ctx.fillRect(Tw / 2, Th / 2, Tw / 2, Th / 2);
+    },
+  },
+  wavy: {
+    name: 'Wavy lines',
+    params: [P('spacing', 'Spacing', 3, 80, 0.1, 10, 'px'), P('wavelength', 'Wavelength', 10, 400, 1, 90, 'px'),
+             P('amplitude', 'Amplitude', 0, 100, 0.5, 12, 'px'), weightP()],
+    size: p => [p.wavelength, p.spacing],
+    drawTile(ctx, Tw, Th, p) {
+      const A = p.amplitude * Th / p.spacing, t = Th * p.weight / 100, N = 96;
+      const K = Math.ceil((A + t) / Th) + 1;
+      ctx.beginPath();
+      for (let k = -K; k <= K; k++) {
+        const y0 = Th / 2 + k * Th;
+        for (let i = 0; i <= N; i++) {
+          const x = Tw * i / N, y = y0 + A * Math.sin(TAU * i / N) - t / 2;
+          i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+        }
+        for (let i = N; i >= 0; i--) ctx.lineTo(Tw * i / N, y0 + A * Math.sin(TAU * i / N) + t / 2);
+        ctx.closePath();
+      }
+      ctx.fill();
+    },
+  },
+  noise: {
+    name: 'Random dots (Glass)',
+    params: [P('density', 'Density', 1, 60, 1, 18, '%'), P('dot', 'Dot size', 1, 12, 0.1, 2.5, 'px'), P('seed', 'Seed', 1, 999, 1, 7)],
+    size: () => [256, 256],
+    drawTile(ctx, Tw, Th, p) {
+      const rnd = mulberry32(Math.round(p.seed) * 9973), k = Tw / 256, r = p.dot / 2;
+      const count = Math.round(p.density / 100 * 65536 / (Math.PI * r * r));
+      ctx.beginPath();
+      for (let i = 0; i < count; i++) {
+        const x = rnd() * 256, y = rnd() * 256;
+        for (const ox of (x < r ? [0, 256] : x > 256 - r ? [0, -256] : [0]))
+          for (const oy of (y < r ? [0, 256] : y > 256 - r ? [0, -256] : [0])) {
+            ctx.moveTo((x + ox + r) * k, (y + oy) * k); ctx.arc((x + ox) * k, (y + oy) * k, r * k, 0, TAU);
+          }
+      }
+      ctx.fill();
+    },
+  },
+  custom: {
+    name: '✎ Hand drawn',
+    custom: true,
+    params: [{ k: 'mode', label: 'Repeat', type: 'select', def: 'tile', options: [['tile', 'Tile across the plane'], ['single', 'Single image']] },
+             P('size', 'Size', 8, 1200, 1, 64, 'px')],
+  },
+};
+
+/* ------------------------------------------------------------------ *
+ * State
+ * ------------------------------------------------------------------ */
+const MASK = 512;
+function makeLayer(name, pattern, color) {
+  const params = {};
+  for (const [k, pre] of Object.entries(PRESETS)) params[k] = Object.fromEntries(pre.params.map(d => [d.k, d.def]));
+  const canvas = document.createElement('canvas');
+  const mask = document.createElement('canvas'); mask.width = mask.height = MASK;
+  const mctx = mask.getContext('2d');
+  // Seed the drawing with a ring so a fresh custom pattern isn't blank.
+  mctx.lineWidth = 70; mctx.beginPath(); mctx.arc(MASK / 2, MASK / 2, 150, 0, TAU); mctx.stroke();
+  return {
+    name, pattern, color, opacity: 1, visible: true, params,
+    base: { x: 0, y: 0, rot: 0, scale: 1 },
+    canvas, ctx: canvas.getContext('2d'),
+    mask, maskVersion: 0,
+    tile: document.createElement('canvas'), tileKey: '', pattern2d: null,
+    colored: document.createElement('canvas'), coloredKey: '',
+    renderKey: '',
+  };
+}
+
+const layers = [makeLayer('A', 'circles', '#0f172a'), makeLayer('B', 'circles', '#e11d48')];
+const state = { bg: '#ffffff', blend: 'multiply', guides: true, tool: 'move', moving: 1 };
+
+const ANIMS = {
+  none: { name: 'None (manual)', params: [] },
+  spin: { name: 'Spin', params: [P('rate', 'Rate', -30, 30, 0.05, 2, '°/s')] },
+  sway: { name: 'Sway (rotate back & forth)', params: [P('amp', 'Amplitude', 0, 90, 0.1, 6, '°'), P('period', 'Period', 0.5, 60, 0.1, 6, 's')] },
+  slide: { name: 'Slide', params: [P('dist', 'Distance', 0, 400, 1, 80, 'px'), P('dir', 'Direction', 0, 180, 1, 0, '°'), P('period', 'Period', 0.5, 60, 0.1, 8, 's')] },
+  orbit: { name: 'Orbit', params: [P('radius', 'Radius', 0, 400, 1, 40, 'px'), P('period', 'Period', 0.5, 60, 0.1, 10, 's')] },
+  eight: { name: 'Figure eight', params: [P('width', 'Width', 0, 400, 1, 120, 'px'), P('height', 'Height', 0, 400, 1, 60, 'px'), P('period', 'Period', 0.5, 60, 0.1, 12, 's')] },
+  breathe: { name: 'Breathe (scale pulse)', params: [P('amount', 'Amount', 0, 50, 0.1, 4, '%'), P('period', 'Period', 0.5, 60, 0.1, 8, 's')] },
+  spiro: { name: 'Orbit + spin', params: [P('radius', 'Radius', 0, 400, 1, 60, 'px'), P('period', 'Period', 0.5, 60, 0.1, 10, 's'), P('rate', 'Spin rate', -30, 30, 0.05, 3, '°/s')] },
+  path: { name: '✎ Drawn path / circuit', params: [] },
+};
+const anim = {
+  mode: 'orbit', playing: true, time: 0, counter: false,
+  params: Object.fromEntries(Object.entries(ANIMS).map(([k, a]) => [k, Object.fromEntries(a.params.map(d => [d.k, d.def]))])),
+  path: { traversal: 'loop', duration: 12, align: false, spin: 0, keys: [] },
+};
+const path = { raw: null, pts: null, head: null };   // raw: drawn points relative to path start
+let recording = null;                                 // stage-relative points while drawing a path
+
+/* ------------------------------------------------------------------ *
+ * Canvases & sizing
+ * ------------------------------------------------------------------ */
+const stage = $('#stage'), sctx = stage.getContext('2d');
+const overlay = $('#overlay'), octx = overlay.getContext('2d');
+let W = 0, H = 0, dpr = 1, compKey = '';
+
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 3);
+  W = innerWidth; H = innerHeight;
+  for (const c of [stage, overlay, ...layers.map(l => l.canvas)]) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
+  invalidate();
+}
+function invalidate() { layers.forEach(l => { l.renderKey = ''; l.tileKey = ''; l.coloredKey = ''; }); compKey = ''; }
+addEventListener('resize', resize);
+
+/* ------------------------------------------------------------------ *
+ * Rendering
+ * ------------------------------------------------------------------ */
+const clampPx = v => clamp(Math.round(v), 2, 2048);
+
+function drawTiled(L, ctx, R, sc, pre, p) {
+  const [w, h] = pre.size(p);
+  const Tw = clampPx(w * sc * dpr), Th = clampPx(h * sc * dpr);
+  const key = JSON.stringify([L.pattern, p, L.color, Tw, Th]);
+  if (key !== L.tileKey) {
+    L.tile.width = Tw; L.tile.height = Th;
+    const t = L.tile.getContext('2d');
+    t.clearRect(0, 0, Tw, Th); t.fillStyle = L.color;
+    pre.drawTile(t, Tw, Th, p);
+    L.tileKey = key; L.pattern2d = null;
+  }
+  fillWithTile(L, ctx, R, w, h, Tw, Th);
+}
+
+function fillWithTile(L, ctx, R, w, h, Tw, Th) {
+  if (!L.pattern2d) L.pattern2d = ctx.createPattern(L.tile, 'repeat');
+  L.pattern2d.setTransform(new DOMMatrix().translate(-w / 2, -h / 2).scale(w / Tw, h / Th));
+  ctx.fillStyle = L.pattern2d;
+  ctx.fillRect(-R, -R, 2 * R, 2 * R);
+}
+
+function coloredMask(L) {
+  const key = L.maskVersion + L.color;
+  if (key !== L.coloredKey) {
+    const c = L.colored; c.width = c.height = MASK;
+    const g = c.getContext('2d');
+    g.clearRect(0, 0, MASK, MASK); g.drawImage(L.mask, 0, 0);
+    g.globalCompositeOperation = 'source-in'; g.fillStyle = L.color; g.fillRect(0, 0, MASK, MASK);
+    g.globalCompositeOperation = 'source-over';
+    L.coloredKey = key;
+  }
+  return L.colored;
+}
+
+function drawCustom(L, ctx, R, sc, p) {
+  const src = coloredMask(L), s = p.size;
+  ctx.imageSmoothingQuality = 'high';
+  if (p.mode === 'single') { ctx.drawImage(src, -s / 2, -s / 2, s, s); return; }
+  const T = clampPx(s * sc * dpr);
+  const key = JSON.stringify(['custom', L.maskVersion, L.color, T]);
+  if (key !== L.tileKey) {
+    L.tile.width = L.tile.height = T;
+    const t = L.tile.getContext('2d');
+    t.imageSmoothingQuality = 'high';
+    t.clearRect(0, 0, T, T); t.drawImage(src, 0, 0, T, T);
+    L.tileKey = key; L.pattern2d = null;
+  }
+  fillWithTile(L, ctx, R, s, s, T, T);
+}
+
+function renderLayer(L, T) {
+  const ctx = L.ctx;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, L.canvas.width, L.canvas.height);
+  if (!L.visible) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.translate(W / 2 + T.x, H / 2 + T.y);
+  ctx.rotate(T.rot * DEG);
+  ctx.scale(T.scale, T.scale);
+  const R = (Math.hypot(W, H) / 2 + Math.hypot(T.x, T.y)) / T.scale + 4;
+  const pre = PRESETS[L.pattern], p = L.params[L.pattern];
+  ctx.fillStyle = ctx.strokeStyle = L.color;
+  if (pre.custom) drawCustom(L, ctx, R, T.scale, p);
+  else if (pre.drawTile) drawTiled(L, ctx, R, T.scale, pre, p);
+  else pre.draw(ctx, R, p, T.scale);
+}
+
+function composite() {
+  sctx.setTransform(1, 0, 0, 1, 0, 0);
+  sctx.globalAlpha = 1; sctx.globalCompositeOperation = 'source-over';
+  sctx.fillStyle = state.bg; sctx.fillRect(0, 0, stage.width, stage.height);
+  for (const L of layers) {
+    if (!L.visible) continue;
+    sctx.globalAlpha = L.opacity; sctx.globalCompositeOperation = state.blend;
+    sctx.drawImage(L.canvas, 0, 0);
+  }
+  sctx.globalAlpha = 1; sctx.globalCompositeOperation = 'source-over';
+}
+
+/* ------------------------------------------------------------------ *
+ * Animation
+ * ------------------------------------------------------------------ */
+function animOffset() {
+  const t = anim.time, p = anim.params[anim.mode];
+  const ph = p && p.period ? TAU * t / p.period : 0;
+  switch (anim.mode) {
+    case 'spin': return { x: 0, y: 0, rot: p.rate * t, ds: 0 };
+    case 'sway': return { x: 0, y: 0, rot: p.amp * Math.sin(ph), ds: 0 };
+    case 'slide': { const d = p.dist * Math.sin(ph); return { x: d * Math.cos(p.dir * DEG), y: d * Math.sin(p.dir * DEG), rot: 0, ds: 0 }; }
+    case 'orbit': return { x: p.radius * Math.cos(ph), y: p.radius * Math.sin(ph), rot: 0, ds: 0 };
+    case 'eight': return { x: p.width * Math.sin(ph), y: p.height * Math.sin(2 * ph), rot: 0, ds: 0 };
+    case 'breathe': return { x: 0, y: 0, rot: 0, ds: p.amount / 100 * Math.sin(ph) };
+    case 'spiro': return { x: p.radius * Math.cos(ph), y: p.radius * Math.sin(ph), rot: p.rate * t, ds: 0 };
+    case 'path': return pathOffset(t);
+  }
+  return null;
+}
+
+function rebuildPath() {
+  if (!path.raw) { path.pts = path.head = null; return; }
+  const closed = anim.path.traversal === 'loop', N = 480;
+  const src = path.raw.slice(); if (closed) src.push(src[0]);
+  const cum = [0];
+  for (let i = 1; i < src.length; i++) cum.push(cum[i - 1] + Math.hypot(src[i][0] - src[i - 1][0], src[i][1] - src[i - 1][1]));
+  const total = cum[cum.length - 1] || 1, pts = [];
+  let j = 0;
+  for (let k = 0; k < N; k++) {
+    const d = closed ? total * k / N : total * k / (N - 1);
+    while (j < src.length - 2 && cum[j + 1] < d) j++;
+    const f = (d - cum[j]) / ((cum[j + 1] - cum[j]) || 1);
+    pts.push([src[j][0] + (src[j + 1][0] - src[j][0]) * f, src[j][1] + (src[j + 1][1] - src[j][1]) * f]);
+  }
+  path.pts = pts;
+  path.head = pts.map((_, k) => {
+    const a = closed ? pts[(k - 1 + N) % N] : pts[Math.max(0, k - 1)];
+    const b = closed ? pts[(k + 1) % N] : pts[Math.min(N - 1, k + 1)];
+    return Math.atan2(b[1] - a[1], b[0] - a[0]);
+  });
+}
+
+function pathFraction(t) {
+  const u = t / anim.path.duration;
+  if (anim.path.traversal === 'loop') return { u, f: u - Math.floor(u) };
+  const g = u - 2 * Math.floor(u / 2);
+  return { u, f: g < 1 ? g : 2 - g };
+}
+
+function samplePath(f) {
+  const N = path.pts.length, closed = anim.path.traversal === 'loop';
+  const idx = closed ? f * N : f * (N - 1);
+  let i0 = Math.floor(idx), i1;
+  if (closed) { i0 %= N; i1 = (i0 + 1) % N; } else { i0 = Math.min(i0, N - 2); i1 = i0 + 1; }
+  const fr = idx - Math.floor(idx), a = path.pts[i0], b = path.pts[i1];
+  return {
+    x: a[0] + (b[0] - a[0]) * fr, y: a[1] + (b[1] - a[1]) * fr,
+    h: path.head[i0] + wrapRad(path.head[i1] - path.head[i0]) * fr,
+  };
+}
+
+function keyframeRot(f) {
+  const ks = anim.path.keys.map(k => ({ p: clamp(k.pos, 0, 100) / 100, a: k.angle })).sort((x, y) => x.p - y.p);
+  if (!ks.length) return 0;
+  if (ks.length === 1) return ks[0].a;
+  const first = ks[0], last = ks[ks.length - 1], loop = anim.path.traversal === 'loop';
+  let A, B;
+  if (f < first.p) { if (!loop) return first.a; A = { p: last.p - 1, a: last.a }; B = first; }
+  else if (f >= last.p) { if (!loop) return last.a; A = last; B = { p: first.p + 1, a: first.a }; }
+  else { let i = 0; while (ks[i + 1].p <= f) i++; A = ks[i]; B = ks[i + 1]; }
+  const span = B.p - A.p;
+  return span > 0 ? A.a + (B.a - A.a) * (f - A.p) / span : B.a;
+}
+
+function pathOffset(t) {
+  if (!path.pts) return null;
+  const { u, f } = pathFraction(t), s = samplePath(f), pa = anim.path;
+  let rot = pa.spin * u + keyframeRot(f);
+  if (pa.align) rot += wrapRad(s.h - path.head[0]) / DEG;
+  return { x: s.x, y: s.y, rot, ds: 0 };
+}
+
+function effective() {
+  const T = layers.map(l => ({ ...l.base }));
+  const off = anim.mode === 'none' ? null : animOffset();
+  if (off) {
+    const m = T[state.moving];
+    m.x += off.x; m.y += off.y; m.rot += off.rot; m.scale *= 1 + off.ds;
+    if (anim.counter) {
+      const o = T[1 - state.moving];
+      o.x -= off.x; o.y -= off.y; o.rot -= off.rot; o.scale /= 1 + off.ds;
+    }
+  }
+  return T;
+}
+
+/* ------------------------------------------------------------------ *
+ * Overlay guides
+ * ------------------------------------------------------------------ */
+function drawOverlay(T) {
+  octx.setTransform(1, 0, 0, 1, 0, 0);
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  if (!state.guides && !recording) return;
+  octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  octx.strokeStyle = octx.fillStyle = '#fff';
+  octx.lineWidth = 1.5; octx.font = '12px system-ui, sans-serif';
+
+  if (recording) {
+    octx.beginPath();
+    recording.forEach(([x, y], i) => i ? octx.lineTo(W / 2 + x, H / 2 + y) : octx.moveTo(W / 2 + x, H / 2 + y));
+    if (anim.path.traversal === 'loop' && recording.length > 2) {
+      octx.stroke(); octx.setLineDash([4, 5]); octx.beginPath();
+      const a = recording[recording.length - 1], b = recording[0];
+      octx.moveTo(W / 2 + a[0], H / 2 + a[1]); octx.lineTo(W / 2 + b[0], H / 2 + b[1]);
+    }
+    octx.stroke(); octx.setLineDash([]);
+  } else if (state.guides && anim.mode === 'path' && path.pts) {
+    const b = layers[state.moving].base, ox = W / 2 + b.x, oy = H / 2 + b.y;
+    octx.setLineDash([6, 6]); octx.globalAlpha = 0.7; octx.beginPath();
+    path.pts.forEach(([x, y], i) => i ? octx.lineTo(ox + x, oy + y) : octx.moveTo(ox + x, oy + y));
+    if (anim.path.traversal === 'loop') octx.closePath();
+    octx.stroke(); octx.setLineDash([]); octx.globalAlpha = 1;
+    octx.beginPath(); octx.arc(ox, oy, 4, 0, TAU); octx.fill();
+    for (const k of anim.path.keys) {
+      const s = samplePath(clamp(k.pos, 0, 100) / 100 * 0.99999);
+      const x = ox + s.x, y = oy + s.y;
+      octx.beginPath(); octx.rect(x - 4, y - 4, 8, 8); octx.stroke();
+      octx.fillText(`${k.angle}°`, x + 8, y - 6);
+    }
+  }
+
+  if (!state.guides) return;
+  T.forEach((t, i) => {
+    const x = W / 2 + t.x, y = H / 2 + t.y;
+    if (i === state.moving) {
+      octx.globalAlpha = 0.9;
+      octx.beginPath(); octx.arc(x, y, 5, 0, TAU); octx.stroke();
+      octx.setLineDash([3, 5]); octx.beginPath(); octx.arc(x, y, 34, 0, TAU); octx.stroke(); octx.setLineDash([]);
+      const a = t.rot * DEG;
+      octx.beginPath(); octx.moveTo(x, y); octx.lineTo(x + 46 * Math.cos(a), y + 46 * Math.sin(a)); octx.stroke();
+      octx.fillText(`${layers[i].name}  ${normDeg(t.rot).toFixed(2)}°`, x + 10, y + 50);
+    } else {
+      octx.globalAlpha = 0.5;
+      octx.beginPath(); octx.moveTo(x - 6, y); octx.lineTo(x + 6, y); octx.moveTo(x, y - 6); octx.lineTo(x, y + 6); octx.stroke();
+      octx.fillText(layers[i].name, x + 8, y - 8);
+    }
+    octx.globalAlpha = 1;
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * Main loop
+ * ------------------------------------------------------------------ */
+let lastNow = performance.now();
+function frame(now) {
+  const dt = Math.min(0.1, (now - lastNow) / 1000); lastNow = now;
+  if (anim.playing && anim.mode !== 'none' && !(anim.mode === 'path' && !path.pts)) anim.time += dt;
+  const T = effective();
+  let changed = false;
+  layers.forEach((L, i) => {
+    const t = T[i];
+    const key = JSON.stringify([t.x, t.y, t.rot, t.scale, L.pattern, L.params[L.pattern], L.color, L.visible, L.maskVersion, W, H, dpr]);
+    if (key !== L.renderKey) { renderLayer(L, t); L.renderKey = key; changed = true; }
+  });
+  const ck = JSON.stringify([state.bg, state.blend, layers.map(l => [l.opacity, l.visible])]);
+  if (changed || ck !== compKey) { compKey = ck; composite(); }
+  drawOverlay(T);
+  requestAnimationFrame(frame);
+}
+
+/* ------------------------------------------------------------------ *
+ * UI helpers
+ * ------------------------------------------------------------------ */
+const decimals = step => { const s = String(step); return s.includes('.') ? s.split('.')[1].length : 0; };
+
+function slider(def, get, set) {
+  const d = decimals(def.step);
+  const r = h('input', { type: 'range', min: def.min, max: def.max, step: def.step });
+  const n = h('input', { type: 'number', class: 'num', min: def.min, max: def.max, step: def.step });
+  const el = h('div', { class: 'row' }, h('span', {}, def.label + (def.unit ? ` (${def.unit})` : '')), r, n);
+  const refresh = () => { const v = get(); r.value = v; n.value = (+v).toFixed(d); };
+  r.addEventListener('input', () => { set(+r.value); n.value = (+r.value).toFixed(d); });
+  n.addEventListener('change', () => {
+    let v = parseFloat(n.value);
+    if (!isFinite(v)) v = get();
+    set(clamp(v, def.min, def.max)); refresh();
+  });
+  refresh();
+  return { el, refresh };
+}
+
+function paramControl(def, obj, onchange) {
+  if (def.type === 'select') {
+    const s = h('select', {}, def.options.map(([v, l]) => h('option', { value: v }, l)));
+    s.value = obj[def.k];
+    s.addEventListener('change', () => { obj[def.k] = s.value; onchange && onchange(); });
+    return h('div', { class: 'row' }, h('span', {}, def.label), s);
+  }
+  return slider(def, () => obj[def.k], v => { obj[def.k] = v; onchange && onchange(); }).el;
+}
+
+function seg(container, options, get, set) {
+  container.innerHTML = '';
+  const btns = options.map(([v, label, title]) => {
+    const b = h('button', { type: 'button', title: title || '', onclick: () => { set(v); refresh(); } }, label);
+    b.dataset.v = v; container.append(b); return b;
+  });
+  function refresh() { btns.forEach(b => b.classList.toggle('active', b.dataset.v === String(get()))); }
+  refresh();
+  return refresh;
+}
+
+/* ------------------------------------------------------------------ *
+ * Layer cards
+ * ------------------------------------------------------------------ */
+function buildLayerCard(i) {
+  const L = layers[i], card = $('#layer' + i);
+  const swatch = h('span', { class: 'swatch', style: `background:${L.color}` });
+  card.innerHTML = '';
+  card.append(h('summary', {}, `Pattern ${L.name}${i === 1 ? ' (top)' : ' (bottom)'}`, swatch));
+  const body = h('div', { class: 'body' });
+  card.append(body);
+
+  const sel = h('select', {}, Object.entries(PRESETS).map(([k, p]) => h('option', { value: k }, p.name)));
+  sel.value = L.pattern;
+  const paramsBox = h('div');
+  const drawBtn = h('button', { type: 'button', onclick: () => openEditor(i) }, '✎ Draw your own…');
+  const rebuildParams = () => {
+    paramsBox.innerHTML = '';
+    for (const d of PRESETS[L.pattern].params) paramsBox.append(paramControl(d, L.params[L.pattern]));
+  };
+  sel.addEventListener('change', () => { L.pattern = sel.value; rebuildParams(); if (L.pattern === 'custom') openEditor(i); });
+  rebuildParams();
+
+  const color = h('input', { type: 'color', class: 'wide', value: L.color });
+  color.addEventListener('input', () => { L.color = color.value; swatch.style.background = L.color; });
+  const vis = h('input', { type: 'checkbox' }); vis.checked = L.visible;
+  vis.addEventListener('change', () => { L.visible = vis.checked; });
+
+  body.append(
+    h('div', { class: 'row' }, h('span', {}, 'Pattern'), sel),
+    paramsBox,
+    h('div', { class: 'row' }, h('span', {}, 'Colour'), color),
+    slider(P('opacity', 'Opacity', 10, 100, 1, 100, '%'), () => Math.round(L.opacity * 100), v => { L.opacity = v / 100; }).el,
+    h('label', { class: 'check' }, vis, 'Visible'),
+    h('div', { class: 'btns' }, drawBtn),
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Motion section
+ * ------------------------------------------------------------------ */
+let motionRefreshers = [], refreshMovingSeg, refreshToolSeg;
+const moving = () => layers[state.moving];
+
+function buildMotion() {
+  refreshMovingSeg = seg($('#movingSeg'), [['0', 'Pattern A'], ['1', 'Pattern B']], () => state.moving,
+    v => { state.moving = +v; buildMotionSliders(); });
+  refreshToolSeg = seg($('#toolSeg'), [['move', '✥ Move', 'Drag to move (M)'], ['rotate', '⟳ Rotate', 'Drag to rotate (R)'], ['path', '✎ Path', 'Drag to draw an animation path (P)']],
+    () => state.tool, setTool);
+  buildMotionSliders();
+}
+
+function buildMotionSliders() {
+  const box = $('#motionSliders'); box.innerHTML = '';
+  const b = () => moving().base;
+  motionRefreshers = [
+    slider(P('rot', 'Rotation', -180, 180, 0.01, 0, '°'), () => normDeg(b().rot), v => { b().rot = v; }),
+    slider(P('scale', 'Scale', 0.2, 5, 0.001, 1, '×'), () => b().scale, v => { b().scale = v; }),
+    slider(P('x', 'Offset X', -1000, 1000, 0.5, 0, 'px'), () => b().x, v => { b().x = v; }),
+    slider(P('y', 'Offset Y', -1000, 1000, 0.5, 0, 'px'), () => b().y, v => { b().y = v; }),
+  ];
+  motionRefreshers.forEach(s => box.append(s.el));
+}
+function refreshMotion() { motionRefreshers.forEach(s => s.refresh()); }
+
+function setTool(t) {
+  state.tool = t;
+  overlay.classList.toggle('tool-path', t === 'path');
+  if (refreshToolSeg) refreshToolSeg();
+}
+
+/* ------------------------------------------------------------------ *
+ * Animation section
+ * ------------------------------------------------------------------ */
+function buildAnim() {
+  const sel = $('#animMode');
+  sel.innerHTML = '';
+  for (const [k, a] of Object.entries(ANIMS)) sel.append(h('option', { value: k }, a.name));
+  sel.value = anim.mode;
+  sel.onchange = () => setAnimMode(sel.value);
+  buildAnimParams();
+}
+
+function setAnimMode(m) {
+  anim.mode = m; anim.time = 0;
+  $('#animMode').value = m;
+  if (m === 'path' && !path.pts) setTool('path');
+  if (m !== 'none') setPlaying(true);
+  buildAnimParams();
+}
+
+function buildAnimParams() {
+  const box = $('#animParams'); box.innerHTML = '';
+  for (const d of ANIMS[anim.mode].params) box.append(paramControl(d, anim.params[anim.mode]));
+  buildPathBox();
+}
+
+function buildPathBox() {
+  const box = $('#pathBox'); box.innerHTML = '';
+  if (anim.mode !== 'path') return;
+  const pa = anim.path;
+  box.append(h('p', { class: 'hint' }, path.pts
+    ? 'The moving layer\'s centre follows the path. Drag the layer to move the whole path.'
+    : 'No path yet — choose “✎ Draw path” and drag on the canvas.'));
+
+  const trav = h('select', {}, h('option', { value: 'loop' }, 'Circuit (loop back to start)'), h('option', { value: 'pingpong' }, 'Back and forth'));
+  trav.value = pa.traversal;
+  trav.onchange = () => { pa.traversal = trav.value; rebuildPath(); };
+  box.append(h('div', { class: 'row' }, h('span', {}, 'Traversal'), trav));
+  box.append(slider(P('duration', 'Lap time', 1, 120, 0.1, 12, 's'), () => pa.duration, v => {
+    // keep the current position on the path when the speed changes
+    anim.time *= v / pa.duration; pa.duration = v;
+  }).el);
+
+  box.append(h('div', { class: 'label' }, 'Rotation along the path'));
+  const align = h('input', { type: 'checkbox' }); align.checked = pa.align;
+  align.onchange = () => { pa.align = align.checked; };
+  box.append(h('label', { class: 'check' }, align, 'Turn with the path direction'));
+  box.append(slider(P('spin', 'Spin per lap', -1080, 1080, 0.5, 0, '°'), () => pa.spin, v => { pa.spin = v; }).el);
+
+  const keysBox = h('div');
+  const renderKeys = () => {
+    keysBox.innerHTML = '';
+    if (!pa.keys.length) { keysBox.append(h('p', { class: 'hint' }, 'Keyframes add a rotation (°) at points along the path (% of a lap); angles are interpolated in between.')); return; }
+    keysBox.append(h('div', { class: 'keys' }, h('span', { class: 'head' }, 'At % of lap'), h('span', { class: 'head' }, 'Rotation °'), h('span')));
+    pa.keys.forEach((k, i) => {
+      const pos = h('input', { type: 'number', class: 'num', min: 0, max: 100, step: 0.5, value: k.pos });
+      const ang = h('input', { type: 'number', class: 'num', step: 0.5, value: k.angle });
+      pos.onchange = () => { k.pos = clamp(parseFloat(pos.value) || 0, 0, 100); pos.value = k.pos; };
+      ang.onchange = () => { k.angle = parseFloat(ang.value) || 0; ang.value = k.angle; };
+      keysBox.append(h('div', { class: 'keys' }, pos, ang, h('button', { type: 'button', title: 'Remove', onclick: () => { pa.keys.splice(i, 1); renderKeys(); } }, '✕')));
+    });
+  };
+  renderKeys();
+  box.append(keysBox);
+  box.append(h('div', { class: 'btns' },
+    h('button', { type: 'button', title: 'Add a keyframe at the current position on the path', onclick: () => {
+      const f = path.pts ? pathFraction(anim.time).f : 0;
+      pa.keys.push({ pos: Math.round(f * 1000) / 10, angle: 0 }); renderKeys();
+    } }, '+ Keyframe here'),
+    h('button', { type: 'button', onclick: () => setTool('path') }, '✎ Redraw path'),
+    h('button', { type: 'button', onclick: () => { path.raw = null; rebuildPath(); buildPathBox(); } }, 'Clear path'),
+  ));
+}
+
+function setPlaying(p) {
+  anim.playing = p;
+  $('#play').textContent = p ? 'Pause' : 'Play';
+  $('#fabPlay').textContent = p ? '❚❚' : '▶';
+}
+
+/* ------------------------------------------------------------------ *
+ * Stage pointer interaction
+ * ------------------------------------------------------------------ */
+const pointers = new Map();
+let gesture = null;
+
+function finishPath() {
+  const rec = recording; recording = null;
+  if (!rec || rec.length < 3) return;
+  let len = 0;
+  for (let i = 1; i < rec.length; i++) len += Math.hypot(rec[i][0] - rec[i - 1][0], rec[i][1] - rec[i - 1][1]);
+  if (len < 20) return;
+  // light smoothing of the hand-drawn stroke
+  const sm = rec.map((_, i) => {
+    let sx = 0, sy = 0, n = 0;
+    for (let j = Math.max(0, i - 3); j <= Math.min(rec.length - 1, i + 3); j++) { sx += rec[j][0]; sy += rec[j][1]; n++; }
+    return [sx / n, sy / n];
+  });
+  sm[0] = rec[0]; sm[sm.length - 1] = rec[rec.length - 1];
+  const [x0, y0] = sm[0];
+  path.raw = sm.map(([x, y]) => [x - x0, y - y0]);
+  const b = moving().base; b.x = x0; b.y = y0;
+  rebuildPath();
+  anim.mode = 'path'; anim.time = 0; $('#animMode').value = 'path';
+  setPlaying(true); setTool('move'); buildAnimParams(); refreshMotion();
+}
+
+overlay.addEventListener('contextmenu', e => e.preventDefault());
+overlay.addEventListener('pointerdown', e => {
+  overlay.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size === 2) {
+    recording = null;
+    const [a, b] = [...pointers.values()];
+    gesture = { type: 'pinch', mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, d: Math.hypot(b.x - a.x, b.y - a.y), ang: Math.atan2(b.y - a.y, b.x - a.x) };
+  } else if (pointers.size === 1) {
+    if (state.tool === 'path') { recording = [[e.clientX - W / 2, e.clientY - H / 2]]; return; }
+    gesture = { type: (state.tool === 'rotate' || e.shiftKey || e.button === 2) ? 'rotate' : 'move', x: e.clientX, y: e.clientY };
+    overlay.classList.add('dragging');
+  }
+});
+overlay.addEventListener('pointermove', e => {
+  if (!pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  const b = moving().base;
+  if (recording) {
+    const p = [e.clientX - W / 2, e.clientY - H / 2], q = recording[recording.length - 1];
+    if (Math.hypot(p[0] - q[0], p[1] - q[1]) >= 2) recording.push(p);
+    return;
+  }
+  if (!gesture) return;
+  if (gesture.type === 'pinch' && pointers.size >= 2) {
+    const [p1, p2] = [...pointers.values()];
+    const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2, d = Math.hypot(p2.x - p1.x, p2.y - p1.y), ang = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+    b.x += mx - gesture.mx; b.y += my - gesture.my;
+    if (gesture.d > 0) b.scale = clamp(b.scale * d / gesture.d, 0.2, 5);
+    b.rot = normDeg(b.rot + wrapRad(ang - gesture.ang) / DEG);
+    Object.assign(gesture, { mx, my, d, ang });
+  } else if (gesture.type === 'move') {
+    b.x += e.clientX - gesture.x; b.y += e.clientY - gesture.y;
+    gesture.x = e.clientX; gesture.y = e.clientY;
+  } else if (gesture.type === 'rotate') {
+    const t = effective()[state.moving], cx = W / 2 + t.x, cy = H / 2 + t.y;
+    const a0 = Math.atan2(gesture.y - cy, gesture.x - cx), a1 = Math.atan2(e.clientY - cy, e.clientX - cx);
+    b.rot = normDeg(b.rot + wrapRad(a1 - a0) / DEG);
+    gesture.x = e.clientX; gesture.y = e.clientY;
+  }
+  refreshMotion();
+});
+function endPointer(e) {
+  pointers.delete(e.pointerId);
+  if (recording && pointers.size === 0) finishPath();
+  if (pointers.size === 0) { gesture = null; overlay.classList.remove('dragging'); }
+  else if (gesture && gesture.type === 'pinch') {
+    const [p] = [...pointers.values()];
+    gesture = { type: 'move', x: p.x, y: p.y };
+  }
+}
+overlay.addEventListener('pointerup', endPointer);
+overlay.addEventListener('pointercancel', endPointer);
+
+overlay.addEventListener('wheel', e => {
+  e.preventDefault();
+  const b = moving().base, d = e.deltaY || e.deltaX;
+  if (e.ctrlKey || e.altKey || e.metaKey) b.scale = clamp(b.scale * Math.exp(-d * 0.0015), 0.2, 5);
+  else b.rot = normDeg(b.rot + d * (e.shiftKey ? 0.002 : 0.02));
+  refreshMotion();
+}, { passive: false });
+
+/* ------------------------------------------------------------------ *
+ * Drawing editor
+ * ------------------------------------------------------------------ */
+const ed = { layer: 1, tool: 'pen', size: 24, undo: [] };
+const edCanvas = $('#edCanvas'), edPreview = $('#edPreview'), pctx = edPreview.getContext('2d');
+let edDrag = null;
+
+function openEditor(i) {
+  const L = layers[i];
+  if (ed.layer !== i) ed.undo = [];
+  ed.layer = i;
+  $('#edLayer').textContent = L.name;
+  if (L.pattern !== 'custom') { L.pattern = 'custom'; buildLayerCard(i); }
+  $('#editor').hidden = false;
+  showMask();
+}
+function closeEditor() { $('#editor').hidden = true; edDrag = null; }
+function edMask() { return layers[ed.layer].mask; }
+function showMask() {
+  const c = edCanvas.getContext('2d');
+  c.clearRect(0, 0, MASK, MASK); c.drawImage(edMask(), 0, 0);
+}
+function maskChanged() { layers[ed.layer].maskVersion++; showMask(); }
+function pushUndo() {
+  ed.undo.push(edMask().getContext('2d').getImageData(0, 0, MASK, MASK));
+  if (ed.undo.length > 30) ed.undo.shift();
+}
+function undo() {
+  const img = ed.undo.pop(); if (!img) return;
+  edMask().getContext('2d').putImageData(img, 0, 0); maskChanged();
+}
+
+// Apply a drawing op with mirror symmetry and (optionally) seamless wrap-around.
+function symDraw(ctx, fn) {
+  const xs = $('#edMx').checked ? [1, -1] : [1], ys = $('#edMy').checked ? [1, -1] : [1];
+  const offs = $('#edWrap').checked ? [-MASK, 0, MASK] : [0];
+  for (const sx of xs) for (const sy of ys) for (const ox of offs) for (const oy of offs) {
+    ctx.save();
+    ctx.translate(ox + MASK / 2, oy + MASK / 2); ctx.scale(sx, sy); ctx.translate(-MASK / 2, -MASK / 2);
+    fn(ctx);
+    ctx.restore();
+  }
+}
+function styleCtx(ctx, preview) {
+  ctx.lineWidth = ed.size; ctx.lineCap = ctx.lineJoin = 'round';
+  const erase = $('#edErase').checked;
+  ctx.strokeStyle = ctx.fillStyle = preview && erase ? 'rgba(255,60,60,.6)' : '#000';
+  ctx.globalCompositeOperation = !preview && erase ? 'destination-out' : 'source-over';
+}
+function shapePath(ctx, a, b) {
+  const fill = $('#edFill').checked;
+  ctx.beginPath();
+  if (ed.tool === 'line') { ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); return; }
+  if (ed.tool === 'rect') ctx.rect(Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));
+  else ctx.ellipse((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, Math.abs(b[0] - a[0]) / 2, Math.abs(b[1] - a[1]) / 2, 0, 0, TAU);
+  fill ? ctx.fill() : ctx.stroke();
+}
+function edPos(e) {
+  const r = edCanvas.getBoundingClientRect();
+  return [(e.clientX - r.left) * MASK / r.width, (e.clientY - r.top) * MASK / r.height];
+}
+
+edCanvas.addEventListener('pointerdown', e => {
+  edCanvas.setPointerCapture(e.pointerId);
+  const p = edPos(e);
+  pushUndo();
+  edDrag = { start: p, last: p };
+  if (ed.tool === 'pen') {
+    const ctx = edMask().getContext('2d');
+    styleCtx(ctx);
+    symDraw(ctx, c => { c.beginPath(); c.arc(p[0], p[1], ed.size / 2, 0, TAU); c.fill(); });
+    ctx.globalCompositeOperation = 'source-over';
+    maskChanged();
+  }
+});
+edCanvas.addEventListener('pointermove', e => {
+  if (!edDrag) return;
+  const p = edPos(e);
+  if (ed.tool === 'pen') {
+    const ctx = edMask().getContext('2d'), a = edDrag.last;
+    styleCtx(ctx);
+    symDraw(ctx, c => { c.beginPath(); c.moveTo(a[0], a[1]); c.lineTo(p[0], p[1]); c.stroke(); });
+    ctx.globalCompositeOperation = 'source-over';
+    edDrag.last = p; maskChanged();
+  } else {
+    pctx.clearRect(0, 0, MASK, MASK);
+    styleCtx(pctx, true);
+    symDraw(pctx, c => shapePath(c, edDrag.start, p));
+    edDrag.last = p;
+  }
+});
+function edEnd() {
+  if (!edDrag) return;
+  if (ed.tool !== 'pen') {
+    pctx.clearRect(0, 0, MASK, MASK);
+    const ctx = edMask().getContext('2d');
+    styleCtx(ctx);
+    symDraw(ctx, c => shapePath(c, edDrag.start, edDrag.last));
+    ctx.globalCompositeOperation = 'source-over';
+    maskChanged();
+  }
+  edDrag = null;
+}
+edCanvas.addEventListener('pointerup', edEnd);
+edCanvas.addEventListener('pointercancel', edEnd);
+
+function buildEditor() {
+  seg($('#edToolSeg'), [['pen', '✎ Pen'], ['line', '╱ Line'], ['rect', '▭ Rect'], ['ellipse', '◯ Ellipse']], () => ed.tool, v => { ed.tool = v; });
+  $('#edSliders').append(slider(P('size', 'Brush size', 1, 128, 1, 24, 'px'), () => ed.size, v => { ed.size = v; }).el);
+  $('#edClose').onclick = closeEditor;
+  $('#edUndo').onclick = undo;
+  $('#edClear').onclick = () => { pushUndo(); edMask().getContext('2d').clearRect(0, 0, MASK, MASK); maskChanged(); };
+  $('#edFillAll').onclick = () => { pushUndo(); const c = edMask().getContext('2d'); c.fillStyle = '#000'; c.fillRect(0, 0, MASK, MASK); maskChanged(); };
+  $('#edInvert').onclick = () => {
+    pushUndo();
+    const tmp = document.createElement('canvas'); tmp.width = tmp.height = MASK;
+    const t = tmp.getContext('2d');
+    t.fillStyle = '#000'; t.fillRect(0, 0, MASK, MASK);
+    t.globalCompositeOperation = 'destination-out'; t.drawImage(edMask(), 0, 0);
+    const c = edMask().getContext('2d'); c.clearRect(0, 0, MASK, MASK); c.drawImage(tmp, 0, 0);
+    maskChanged();
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Global controls & keyboard
+ * ------------------------------------------------------------------ */
+function togglePanel() { $('#panel').classList.toggle('hidden'); }
+
+function wireGlobal() {
+  const bg = $('#bg'); bg.value = state.bg; bg.oninput = () => { state.bg = bg.value; };
+  const blend = $('#blend'); blend.value = state.blend; blend.onchange = () => { state.blend = blend.value; };
+  $('#swap').onclick = () => {
+    const [a, b] = layers;
+    for (const k of ['pattern', 'color', 'opacity', 'visible', 'params', 'base', 'mask', 'maskVersion']) [a[k], b[k]] = [b[k], a[k]];
+    state.moving = 1 - state.moving;
+    invalidate(); ed.undo = [];
+    buildLayerCard(0); buildLayerCard(1); refreshMovingSeg(); buildMotionSliders();
+    if (!$('#editor').hidden) showMask();
+  };
+  $('#resetPose').onclick = () => { Object.assign(moving().base, { x: 0, y: 0, rot: 0, scale: 1 }); refreshMotion(); };
+  $('#counter').onchange = e => { anim.counter = e.target.checked; };
+  $('#play').onclick = $('#fabPlay').onclick = () => setPlaying(!anim.playing);
+  $('#restart').onclick = () => { anim.time = 0; };
+  $('#fabPanel').onclick = togglePanel;
+  $('#guides').onchange = e => { state.guides = e.target.checked; };
+  $('#snapshot').onclick = () => stage.toBlob(blob => {
+    const a = h('a', { href: URL.createObjectURL(blob), download: 'moire.png' });
+    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+
+  addEventListener('keydown', e => {
+    const tag = e.target.tagName;
+    if (e.key === 'Escape') { if (!$('#editor').hidden) closeEditor(); else if (state.tool === 'path') { recording = null; setTool('move'); } return; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !$('#editor').hidden) { e.preventDefault(); undo(); return; }
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || e.ctrlKey || e.metaKey || e.altKey) return;
+    const b = moving().base, fine = e.shiftKey;
+    let handled = true;
+    switch (e.key) {
+      case ' ': setPlaying(!anim.playing); break;
+      case 'h': case 'H': togglePanel(); break;
+      case 'g': case 'G': state.guides = !state.guides; $('#guides').checked = state.guides; break;
+      case '[': case '{': b.rot = normDeg(b.rot - (fine ? 0.05 : 0.5)); break;
+      case ']': case '}': b.rot = normDeg(b.rot + (fine ? 0.05 : 0.5)); break;
+      case 'ArrowLeft': b.x -= fine ? 10 : 1; break;
+      case 'ArrowRight': b.x += fine ? 10 : 1; break;
+      case 'ArrowUp': b.y -= fine ? 10 : 1; break;
+      case 'ArrowDown': b.y += fine ? 10 : 1; break;
+      case '+': case '=': b.scale = clamp(b.scale * 1.01, 0.2, 5); break;
+      case '-': case '_': b.scale = clamp(b.scale / 1.01, 0.2, 5); break;
+      case '0': Object.assign(b, { x: 0, y: 0, rot: 0, scale: 1 }); break;
+      case '1': case '2': state.moving = +e.key - 1; refreshMovingSeg(); buildMotionSliders(); break;
+      case 'm': case 'M': setTool('move'); break;
+      case 'r': case 'R': setTool('rotate'); break;
+      case 'p': case 'P': setTool('path'); break;
+      default: handled = false;
+    }
+    if (handled) { e.preventDefault(); refreshMotion(); }
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * Boot
+ * ------------------------------------------------------------------ */
+layers[1].base.x = 40;
+resize();
+buildLayerCard(0); buildLayerCard(1);
+buildMotion(); buildAnim(); buildEditor(); wireGlobal();
+setPlaying(anim.playing);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
