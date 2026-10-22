@@ -1,5 +1,7 @@
 # Moiré Exploré
 
+**Live:** [https://sonusario.github.io/moire_explore/](https://sonusario.github.io/moire_explore/)
+
 A single-file web app for exploring moiré patterns. Open `index.html` in any modern browser — no build step, no dependencies.
 
 Two patterns, **A** (bottom) and **B** (top), are layered on top of each other. Move, rotate, scale or animate one of them and watch the interference fringes appear.
