@@ -86,7 +86,9 @@
     border: 1px solid var(--line); border-radius: 12px; padding: 12px;
   }
   #editor[hidden] { display: none; }
-  #editor header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  #editor header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  #editor header .seg { margin: 0; flex: 0 0 96px; }
+  #editor header #edClose { margin-left: auto; }
   .edWrap { position: relative; width: 100%; aspect-ratio: 1; margin: 8px 0; border-radius: 4px; overflow: hidden;
     background: #fff; outline: 1px dashed rgba(255, 255, 255, .4); }
   .edWrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
@@ -111,6 +113,7 @@
 <aside id="panel">
   <h1>Moiré Exploré</h1>
   <p class="sub">Overlay two patterns and watch interference emerge.</p>
+  <div class="row"><span>Try a recipe</span><select id="recipe"></select></div>
 
   <details open id="layer0"></details>
   <details open id="layer1"></details>
@@ -131,7 +134,7 @@
           <option value="lighten">Lighten</option>
         </select>
       </div>
-      <div class="btns"><button id="swap">⇅ Swap A / B</button></div>
+      <div class="btns"><button id="swap">⇅ Put A on top</button></div>
     </div>
   </details>
 
@@ -177,7 +180,8 @@
 </aside>
 
 <div id="editor" hidden>
-  <header><strong>Draw pattern <span id="edLayer">B</span></strong><button id="edClose" title="Close (Esc)">✕</button></header>
+  <header><strong>Draw pattern</strong><div class="seg" id="edLayerSeg"></div><button id="edClose" title="Close (Esc)">✕</button></header>
+  <p class="hint" id="edNote" hidden></p>
   <div class="seg" id="edToolSeg"></div>
   <div id="edSliders"></div>
   <label class="check"><input type="checkbox" id="edErase"> Eraser</label>
@@ -191,6 +195,10 @@
     <button id="edClear">Clear</button>
     <button id="edFillAll">Fill</button>
     <button id="edInvert">Invert</button>
+  </div>
+  <div class="btns">
+    <button id="edCopyAB" title="Replace B's drawing with a copy of A's">Copy A → B</button>
+    <button id="edCopyBA" title="Replace A's drawing with a copy of B's">Copy B → A</button>
   </div>
   <p class="hint">Black areas become the layer's coloured, opaque parts. Tile size and repeat mode are set in the layer's panel. The canvas behind updates as you draw.</p>
 </div>
@@ -231,6 +239,76 @@ function mulberry32(a) {
  * Tile presets give a period size(p) -> [w, h] (local px) and draw one
  * tile of Tw x Th device px; the tile is repeated with a canvas pattern.
  * ------------------------------------------------------------------ */
+/* Scanimation subjects: draw(ctx, cx, cy, S, t, Tw) fills one frame at phase t ∈ [0, 1)
+ * inside an S×S cell centred on (cx, cy); Tw is the tile width (for subjects that span it). */
+const SUBJECTS = {
+  star: { name: 'Spinning star', draw(ctx, cx, cy, S, t) {
+    const n = 5, ro = S * 0.4, ri = S * 0.17, a0 = t * TAU / n - Math.PI / 2;
+    ctx.beginPath();
+    for (let i = 0; i < 2 * n; i++) { const r = i % 2 ? ri : ro, a = a0 + i * Math.PI / n; ctx.lineTo(cx + r * Math.cos(a), cy + r * Math.sin(a)); }
+    ctx.fill();
+  } },
+  ball: { name: 'Bouncing ball', draw(ctx, cx, cy, S, t) {
+    const floor = cy + S * 0.36, r = S * 0.11, hgt = Math.sin(Math.PI * t);
+    const sq = 1 + 0.35 * Math.max(0, 1 - hgt * 4);   // squash near the floor
+    const y = floor - r / sq - hgt * S * 0.5;
+    ctx.beginPath(); ctx.ellipse(cx, y, r * sq, r / sq, 0, 0, TAU); ctx.fill();
+    ctx.fillRect(cx - S * 0.4, floor, S * 0.8, S * 0.04);
+  } },
+  pulse: { name: 'Beating heart', draw(ctx, cx, cy, S, t) {
+    const k = S * (0.26 + 0.08 * Math.pow(Math.sin(Math.PI * t), 2)) / 16;
+    ctx.beginPath();
+    for (let i = 0; i <= 64; i++) {
+      const a = i / 64 * TAU, x = 16 * Math.pow(Math.sin(a), 3), y = 13 * Math.cos(a) - 5 * Math.cos(2 * a) - 2 * Math.cos(3 * a) - Math.cos(4 * a);
+      ctx.lineTo(cx + x * k, cy - y * k);
+    }
+    ctx.fill();
+  } },
+  orbit: { name: 'Orbiting moons', draw(ctx, cx, cy, S, t) {
+    ctx.beginPath(); ctx.arc(cx, cy, S * 0.1, 0, TAU);
+    for (let i = 0; i < 3; i++) {
+      const a = t * TAU + i * TAU / 3, x = cx + S * 0.3 * Math.cos(a), y = cy + S * 0.3 * Math.sin(a);
+      ctx.moveTo(x + S * 0.07, y); ctx.arc(x, y, S * 0.07, 0, TAU);
+    }
+    ctx.fill();
+  } },
+  wave: { name: 'Travelling wave', draw(ctx, cx, cy, S, t, Tw) {
+    const A = S * 0.18, th = S * 0.12, n = 96, y = x => cy + A * Math.sin(TAU * (x / Tw - t));
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) ctx.lineTo(Tw * i / n, y(Tw * i / n) - th / 2);
+    for (let i = n; i >= 0; i--) ctx.lineTo(Tw * i / n, y(Tw * i / n) + th / 2);
+    ctx.fill();
+  } },
+};
+/* Radial scanimation subjects: draw(ctx, R, size, t) covers a disc of radius R around the origin. */
+const RSUBJECTS = {
+  ripple: { name: 'Expanding ripples', draw(ctx, R, s, t) {
+    ctx.beginPath();
+    for (let r = t * s; r < R + s; r += s) { const ri = Math.max(0, r - s * 0.25), ro = r + s * 0.25; if (ri > 0) { ctx.moveTo(ri, 0); ctx.arc(0, 0, ri, 0, TAU); } ctx.moveTo(ro, 0); ctx.arc(0, 0, ro, 0, TAU); }
+    ctx.fill('evenodd');
+  } },
+  pinwheel: { name: 'Turning pinwheel', draw(ctx, R, s, t) {
+    const n = 6, a0 = t * TAU / n;
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const a = a0 + i * TAU / n;
+      ctx.moveTo(0, 0); ctx.arc(0, 0, R, a, a + TAU / n / 2); ctx.closePath();
+    }
+    ctx.fill();
+  } },
+  dots: { name: 'Circling dots', draw(ctx, R, s, t) {
+    ctx.beginPath();
+    for (let ring = 1; ring * s < R + s; ring++) {
+      const r = ring * s, n = Math.max(3, Math.round(TAU * r / (s * 2))), dir = ring % 2 ? 1 : -1, d = s * 0.28;
+      for (let i = 0; i < n; i++) {
+        const a = (i + dir * t) * TAU / n;
+        ctx.moveTo(r * Math.cos(a) + d, r * Math.sin(a)); ctx.arc(r * Math.cos(a), r * Math.sin(a), d, 0, TAU);
+      }
+    }
+    ctx.fill();
+  } },
+};
+
 const P = (k, label, min, max, step, def, unit = '') => ({ k, label, min, max, step, def, unit });
 const weightP = (def = 50) => P('weight', 'Line weight', 5, 95, 1, def, '%');
 
@@ -383,8 +461,72 @@ const PRESETS = {
       ctx.fill();
     },
   },
+  scan: {
+    name: 'Scanimation frames',
+    group: 'scan',
+    note: 'Interlaced animation frames. Put “Scanimation barrier” with the same Frames and Slit on the other layer, then Drift it sideways.',
+    params: [{ k: 'subject', label: 'Subject', type: 'select', def: 'star', options: Object.entries(SUBJECTS).map(([k, s]) => [k, s.name]) },
+             P('frames', 'Frames', 2, 12, 1, 6), P('slit', 'Slit width', 1, 20, 0.1, 4, 'px'), P('cell', 'Cell size', 40, 600, 1, 160, 'px')],
+    size: p => { const per = Math.round(p.frames) * p.slit, m = Math.max(1, Math.round(p.cell / per)); return [m * per, m * per]; },
+    drawTile(ctx, Tw, Th, p) {
+      // Column boundaries line up with the layer's origin (the tile centre), and the column just
+      // right of the origin holds frame 0, so a barrier at the same origin shows frame 0 at rest.
+      const N = Math.round(p.frames), cols = Math.round(this.size(p)[0] / p.slit), cw = Tw / cols;
+      const c0 = Math.floor(cols / 2), off = Tw / 2 - c0 * cw;
+      for (let k = 0; k < N; k++) {
+        ctx.save(); ctx.beginPath();
+        for (let c = -1; c <= cols; c++) if (((c - c0) % N + N) % N === k) ctx.rect(off + c * cw, 0, cw, Th);
+        ctx.clip();
+        SUBJECTS[p.subject].draw(ctx, Tw / 2, Th / 2, Math.min(Tw, Th), k / N, Tw);
+        ctx.restore();
+      }
+    },
+  },
+  scanBar: {
+    name: 'Scanimation barrier',
+    group: 'scan',
+    note: 'Opaque bars with one slit per cycle. Match Frames and Slit to the frames layer.',
+    params: [P('frames', 'Frames', 2, 12, 1, 6), P('slit', 'Slit width', 1, 20, 0.1, 4, 'px')],
+    period: p => [Math.round(p.frames) * p.slit, 0],
+    draw(ctx, R, p) {
+      const s = p.slit, per = Math.round(p.frames) * s, n = Math.ceil(R / per) + 1;
+      ctx.beginPath();
+      for (let i = -n; i <= n; i++) ctx.rect(i * per + s, -R, per - s, 2 * R);   // slit at [i·per, i·per + s]
+      ctx.fill();
+    },
+  },
+  scanR: {
+    name: 'Radial scanimation frames',
+    group: 'scan',
+    note: 'Frames interlaced by angle. Put “Radial scanimation barrier” with the same Frames and Slits on the other layer, centre both, then Spin it.',
+    params: [{ k: 'subject', label: 'Subject', type: 'select', def: 'ripple', options: Object.entries(RSUBJECTS).map(([k, s]) => [k, s.name]) },
+             P('frames', 'Frames', 2, 12, 1, 6), P('slits', 'Slits', 4, 90, 1, 30), P('size', 'Feature size', 6, 200, 0.5, 36, 'px')],
+    draw(ctx, R, p) {
+      const N = Math.round(p.frames), S = N * Math.round(p.slits), a = TAU / S;
+      for (let k = 0; k < N; k++) {
+        ctx.save(); ctx.beginPath();
+        for (let j = k; j < S; j += N) { ctx.moveTo(0, 0); ctx.arc(0, 0, R, j * a, (j + 1) * a); ctx.closePath(); }
+        ctx.clip();
+        RSUBJECTS[p.subject].draw(ctx, R, p.size, k / N);
+        ctx.restore();
+      }
+    },
+  },
+  scanBarR: {
+    name: 'Radial scanimation barrier',
+    group: 'scan',
+    note: 'Opaque wedges with one slit per cycle. Match Frames and Slits to the frames layer.',
+    params: [P('frames', 'Frames', 2, 12, 1, 6), P('slits', 'Slits', 4, 90, 1, 30)],
+    draw(ctx, R, p) {
+      const N = Math.round(p.frames), M = Math.round(p.slits), a = TAU / (N * M);
+      ctx.beginPath();
+      for (let i = 0; i < M; i++) { ctx.moveTo(0, 0); ctx.arc(0, 0, R, (i * N + 1) * a, (i + 1) * N * a); ctx.closePath(); }
+      ctx.fill();
+    },
+  },
   custom: {
     name: '✎ Hand drawn',
+    group: 'draw',
     custom: true,
     params: [{ k: 'mode', label: 'Repeat', type: 'select', def: 'tile', options: [['tile', 'Tile across the plane'], ['single', 'Single image']] },
              P('size', 'Size', 8, 1200, 1, 64, 'px')],
@@ -415,12 +557,14 @@ function makeLayer(name, pattern, color) {
 }
 
 const layers = [makeLayer('A', 'circles', '#0f172a'), makeLayer('B', 'circles', '#e11d48')];
-const state = { bg: '#ffffff', blend: 'multiply', guides: true, tool: 'move', moving: 1 };
+// order: layer indices bottom → top. Swapping only changes the stacking; A stays A and B stays B.
+const state = { bg: '#ffffff', blend: 'source-over', guides: true, tool: 'move', moving: 1, order: [0, 1] };
 
 const ANIMS = {
   none: { name: 'None (manual)', params: [] },
   spin: { name: 'Spin', params: [P('rate', 'Rate', -30, 30, 0.05, 2, '°/s')] },
   sway: { name: 'Sway (rotate back & forth)', params: [P('amp', 'Amplitude', 0, 90, 0.1, 6, '°'), P('period', 'Period', 0.5, 60, 0.1, 6, 's')] },
+  drift: { name: 'Drift (steady glide)', params: [P('speed', 'Speed', -200, 200, 0.5, 40, 'px/s'), P('dir', 'Direction', -180, 180, 1, 0, '°')] },
   slide: { name: 'Slide', params: [P('dist', 'Distance', 0, 400, 1, 80, 'px'), P('dir', 'Direction', 0, 180, 1, 0, '°'), P('period', 'Period', 0.5, 60, 0.1, 8, 's')] },
   orbit: { name: 'Orbit', params: [P('radius', 'Radius', 0, 400, 1, 40, 'px'), P('period', 'Period', 0.5, 60, 0.1, 10, 's')] },
   eight: { name: 'Figure eight', params: [P('width', 'Width', 0, 400, 1, 120, 'px'), P('height', 'Height', 0, 400, 1, 60, 'px'), P('period', 'Period', 0.5, 60, 0.1, 12, 's')] },
@@ -428,8 +572,11 @@ const ANIMS = {
   spiro: { name: 'Orbit + spin', params: [P('radius', 'Radius', 0, 400, 1, 60, 'px'), P('period', 'Period', 0.5, 60, 0.1, 10, 's'), P('rate', 'Spin rate', -30, 30, 0.05, 3, '°/s')] },
   path: { name: '✎ Drawn path / circuit', params: [] },
 };
+// The clock integrates motion frame by frame (phase, spin angle, drift distance, path laps)
+// so changing a rate or period mid-animation changes the speed smoothly instead of jumping the pose.
+const newClock = () => ({ ph: 0, spin: 0, dx: 0, dy: 0, laps: 0 });
 const anim = {
-  mode: 'orbit', playing: true, time: 0, counter: false,
+  mode: 'orbit', playing: true, clock: newClock(), counter: false,
   params: Object.fromEntries(Object.entries(ANIMS).map(([k, a]) => [k, Object.fromEntries(a.params.map(d => [d.k, d.def]))])),
   path: { traversal: 'loop', duration: 12, align: false, spin: 0, keys: [] },
 };
@@ -507,8 +654,31 @@ function drawCustom(L, ctx, R, sc, p) {
   fillWithTile(L, ctx, R, s, s, T, T);
 }
 
+// Translation period [w, h] of a layer's pattern in its own coordinates (0 = any shift looks the same),
+// or null if the pattern isn't periodic.
+function periodOf(L) {
+  const pre = PRESETS[L.pattern], p = L.params[L.pattern];
+  if (pre.custom) return p.mode === 'tile' ? [p.size, p.size] : null;
+  if (pre.period) return pre.period(p);
+  if (pre.size) return pre.size(p);
+  return null;
+}
+
+// Move a periodic layer's origin back by whole periods so a long drift never makes
+// the drawing area (and the work to fill it) grow. The picture is unchanged.
+function reduceOffset(L, T) {
+  const per = periodOf(L);
+  if (!per) return T;
+  const c = Math.cos(T.rot * DEG), s = Math.sin(T.rot * DEG);
+  let lx = (c * T.x + s * T.y) / T.scale, ly = (-s * T.x + c * T.y) / T.scale;
+  const red = (v, w) => w === 0 ? 0 : v - w * Math.round(v / w);
+  lx = red(lx, per[0]); ly = red(ly, per[1]);
+  return { ...T, x: (c * lx - s * ly) * T.scale, y: (s * lx + c * ly) * T.scale };
+}
+
 function renderLayer(L, T) {
   const ctx = L.ctx;
+  T = reduceOffset(L, T);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, L.canvas.width, L.canvas.height);
   if (!L.visible) return;
@@ -528,7 +698,7 @@ function composite() {
   sctx.setTransform(1, 0, 0, 1, 0, 0);
   sctx.globalAlpha = 1; sctx.globalCompositeOperation = 'source-over';
   sctx.fillStyle = state.bg; sctx.fillRect(0, 0, stage.width, stage.height);
-  for (const L of layers) {
+  for (const L of state.order.map(i => layers[i])) {
     if (!L.visible) continue;
     sctx.globalAlpha = L.opacity; sctx.globalCompositeOperation = state.blend;
     sctx.drawImage(L.canvas, 0, 0);
@@ -539,18 +709,26 @@ function composite() {
 /* ------------------------------------------------------------------ *
  * Animation
  * ------------------------------------------------------------------ */
+function tickClock(dt) {
+  const c = anim.clock, p = anim.params[anim.mode];
+  if (anim.mode === 'path') { c.laps += dt / anim.path.duration; return; }
+  if (p.period) c.ph += dt / p.period;
+  if (p.rate != null) c.spin += p.rate * dt;
+  if (p.speed != null) { c.dx += p.speed * Math.cos(p.dir * DEG) * dt; c.dy += p.speed * Math.sin(p.dir * DEG) * dt; }
+}
+
 function animOffset() {
-  const t = anim.time, p = anim.params[anim.mode];
-  const ph = p && p.period ? TAU * t / p.period : 0;
+  const c = anim.clock, p = anim.params[anim.mode], ph = TAU * c.ph;
   switch (anim.mode) {
-    case 'spin': return { x: 0, y: 0, rot: p.rate * t, ds: 0 };
+    case 'spin': return { x: 0, y: 0, rot: c.spin, ds: 0 };
+    case 'drift': return { x: c.dx, y: c.dy, rot: 0, ds: 0 };
     case 'sway': return { x: 0, y: 0, rot: p.amp * Math.sin(ph), ds: 0 };
     case 'slide': { const d = p.dist * Math.sin(ph); return { x: d * Math.cos(p.dir * DEG), y: d * Math.sin(p.dir * DEG), rot: 0, ds: 0 }; }
     case 'orbit': return { x: p.radius * Math.cos(ph), y: p.radius * Math.sin(ph), rot: 0, ds: 0 };
     case 'eight': return { x: p.width * Math.sin(ph), y: p.height * Math.sin(2 * ph), rot: 0, ds: 0 };
     case 'breathe': return { x: 0, y: 0, rot: 0, ds: p.amount / 100 * Math.sin(ph) };
-    case 'spiro': return { x: p.radius * Math.cos(ph), y: p.radius * Math.sin(ph), rot: p.rate * t, ds: 0 };
-    case 'path': return pathOffset(t);
+    case 'spiro': return { x: p.radius * Math.cos(ph), y: p.radius * Math.sin(ph), rot: c.spin, ds: 0 };
+    case 'path': return pathOffset(c.laps);
   }
   return null;
 }
@@ -577,8 +755,7 @@ function rebuildPath() {
   });
 }
 
-function pathFraction(t) {
-  const u = t / anim.path.duration;
+function pathFraction(u) {
   if (anim.path.traversal === 'loop') return { u, f: u - Math.floor(u) };
   const g = u - 2 * Math.floor(u / 2);
   return { u, f: g < 1 ? g : 2 - g };
@@ -609,9 +786,9 @@ function keyframeRot(f) {
   return span > 0 ? A.a + (B.a - A.a) * (f - A.p) / span : B.a;
 }
 
-function pathOffset(t) {
+function pathOffset(laps) {
   if (!path.pts) return null;
-  const { u, f } = pathFraction(t), s = samplePath(f), pa = anim.path;
+  const { u, f } = pathFraction(laps), s = samplePath(f), pa = anim.path;
   let rot = pa.spin * u + keyframeRot(f);
   if (pa.align) rot += wrapRad(s.h - path.head[0]) / DEG;
   return { x: s.x, y: s.y, rot, ds: 0 };
@@ -691,7 +868,7 @@ function drawOverlay(T) {
 let lastNow = performance.now();
 function frame(now) {
   const dt = Math.min(0.1, (now - lastNow) / 1000); lastNow = now;
-  if (anim.playing && anim.mode !== 'none' && !(anim.mode === 'path' && !path.pts)) anim.time += dt;
+  if (anim.playing && anim.mode !== 'none' && !(anim.mode === 'path' && !path.pts)) tickClock(dt);
   const T = effective();
   let changed = false;
   layers.forEach((L, i) => {
@@ -699,7 +876,7 @@ function frame(now) {
     const key = JSON.stringify([t.x, t.y, t.rot, t.scale, L.pattern, L.params[L.pattern], L.color, L.visible, L.maskVersion, W, H, dpr]);
     if (key !== L.renderKey) { renderLayer(L, t); L.renderKey = key; changed = true; }
   });
-  const ck = JSON.stringify([state.bg, state.blend, layers.map(l => [l.opacity, l.visible])]);
+  const ck = JSON.stringify([state.bg, state.blend, state.order, layers.map(l => [l.opacity, l.visible])]);
   if (changed || ck !== compKey) { compKey = ck; composite(); }
   drawOverlay(T);
   requestAnimationFrame(frame);
@@ -754,19 +931,28 @@ function buildLayerCard(i) {
   const L = layers[i], card = $('#layer' + i);
   const swatch = h('span', { class: 'swatch', style: `background:${L.color}` });
   card.innerHTML = '';
-  card.append(h('summary', {}, `Pattern ${L.name}${i === 1 ? ' (top)' : ' (bottom)'}`, swatch));
+  card.append(h('summary', {}, `Pattern ${L.name}${state.order[1] === i ? ' (top)' : ' (bottom)'}`, swatch));
   const body = h('div', { class: 'body' });
   card.append(body);
 
-  const sel = h('select', {}, Object.entries(PRESETS).map(([k, p]) => h('option', { value: k }, p.name)));
+  const groups = [['basic', 'Patterns'], ['scan', 'Scanimation (animates when moved)'], ['draw', 'Your own']];
+  const sel = h('select', {}, groups.map(([g, label]) => h('optgroup', { label },
+    Object.entries(PRESETS).filter(([, p]) => (p.group || 'basic') === g).map(([k, p]) => h('option', { value: k }, p.name)))));
   sel.value = L.pattern;
   const paramsBox = h('div');
   const drawBtn = h('button', { type: 'button', onclick: () => openEditor(i) }, '✎ Draw your own…');
   const rebuildParams = () => {
     paramsBox.innerHTML = '';
-    for (const d of PRESETS[L.pattern].params) paramsBox.append(paramControl(d, L.params[L.pattern]));
+    const pre = PRESETS[L.pattern];
+    for (const d of pre.params) paramsBox.append(paramControl(d, L.params[L.pattern], () => syncScan(i)));
+    if (pre.note) paramsBox.append(h('p', { class: 'hint' }, pre.note));
   };
-  sel.addEventListener('change', () => { L.pattern = sel.value; rebuildParams(); if (L.pattern === 'custom') openEditor(i); });
+  sel.addEventListener('change', () => {
+    L.pattern = sel.value; rebuildParams();
+    syncScan(1 - i);   // picking a barrier (or frames) takes the other layer's Frames / Slit
+    if (L.pattern === 'custom') openEditor(i);
+    else if (!$('#editor').hidden && ed.layer === i) refreshEditor();
+  });
   rebuildParams();
 
   const color = h('input', { type: 'color', class: 'wide', value: L.color });
@@ -782,6 +968,19 @@ function buildLayerCard(i) {
     h('label', { class: 'check' }, vis, 'Visible'),
     h('div', { class: 'btns' }, drawBtn),
   );
+}
+
+// Scanimation frames and their barrier only work with matching Frames / Slit(s):
+// when one layer's value changes, carry it over to the paired layer.
+const SCAN_PAIRS = { scan: ['scanBar', ['frames', 'slit']], scanBar: ['scan', ['frames', 'slit']],
+                     scanR: ['scanBarR', ['frames', 'slits']], scanBarR: ['scanR', ['frames', 'slits']] };
+function syncScan(i) {
+  const L = layers[i], O = layers[1 - i], pair = SCAN_PAIRS[L.pattern];
+  if (!pair || O.pattern !== pair[0]) return;
+  const src = L.params[L.pattern], dst = O.params[O.pattern];
+  if (pair[1].every(k => dst[k] === src[k])) return;
+  pair[1].forEach(k => { dst[k] = src[k]; });
+  buildLayerCard(1 - i);
 }
 
 /* ------------------------------------------------------------------ *
@@ -830,7 +1029,7 @@ function buildAnim() {
 }
 
 function setAnimMode(m) {
-  anim.mode = m; anim.time = 0;
+  anim.mode = m; anim.clock = newClock();
   $('#animMode').value = m;
   if (m === 'path' && !path.pts) setTool('path');
   if (m !== 'none') setPlaying(true);
@@ -855,10 +1054,7 @@ function buildPathBox() {
   trav.value = pa.traversal;
   trav.onchange = () => { pa.traversal = trav.value; rebuildPath(); };
   box.append(h('div', { class: 'row' }, h('span', {}, 'Traversal'), trav));
-  box.append(slider(P('duration', 'Lap time', 1, 120, 0.1, 12, 's'), () => pa.duration, v => {
-    // keep the current position on the path when the speed changes
-    anim.time *= v / pa.duration; pa.duration = v;
-  }).el);
+  box.append(slider(P('duration', 'Lap time', 1, 120, 0.1, 12, 's'), () => pa.duration, v => { pa.duration = v; }).el);
 
   box.append(h('div', { class: 'label' }, 'Rotation along the path'));
   const align = h('input', { type: 'checkbox' }); align.checked = pa.align;
@@ -883,7 +1079,7 @@ function buildPathBox() {
   box.append(keysBox);
   box.append(h('div', { class: 'btns' },
     h('button', { type: 'button', title: 'Add a keyframe at the current position on the path', onclick: () => {
-      const f = path.pts ? pathFraction(anim.time).f : 0;
+      const f = path.pts ? pathFraction(anim.clock.laps).f : 0;
       pa.keys.push({ pos: Math.round(f * 1000) / 10, angle: 0 }); renderKeys();
     } }, '+ Keyframe here'),
     h('button', { type: 'button', onclick: () => setTool('path') }, '✎ Redraw path'),
@@ -920,7 +1116,7 @@ function finishPath() {
   path.raw = sm.map(([x, y]) => [x - x0, y - y0]);
   const b = moving().base; b.x = x0; b.y = y0;
   rebuildPath();
-  anim.mode = 'path'; anim.time = 0; $('#animMode').value = 'path';
+  anim.mode = 'path'; anim.clock = newClock(); $('#animMode').value = 'path';
   setPlaying(true); setTool('move'); buildAnimParams(); refreshMotion();
 }
 
@@ -989,32 +1185,55 @@ overlay.addEventListener('wheel', e => {
 /* ------------------------------------------------------------------ *
  * Drawing editor
  * ------------------------------------------------------------------ */
-const ed = { layer: 1, tool: 'pen', size: 24, undo: [] };
+const ed = { layer: 1, tool: 'pen', size: 24, undo: [[], []] };   // one undo history per layer
 const edCanvas = $('#edCanvas'), edPreview = $('#edPreview'), pctx = edPreview.getContext('2d');
 let edDrag = null;
 
-function openEditor(i) {
-  const L = layers[i];
-  if (ed.layer !== i) ed.undo = [];
+let refreshEdLayerSeg;
+// From a layer card: the layer switches to its drawing. From the editor's A/B switch (convert = false)
+// the layer only switches once you change the drawing, so just looking doesn't replace its preset.
+function openEditor(i, convert = true) {
   ed.layer = i;
-  $('#edLayer').textContent = L.name;
-  if (L.pattern !== 'custom') { L.pattern = 'custom'; buildLayerCard(i); }
+  if (convert) ensureCustom(i);
   $('#editor').hidden = false;
+  refreshEditor();
+}
+function ensureCustom(i) {
+  const L = layers[i];
+  if (L.pattern !== 'custom') { L.pattern = 'custom'; buildLayerCard(i); }
+}
+function refreshEditor() {
+  const L = layers[ed.layer], note = $('#edNote');
+  note.hidden = L.pattern === 'custom';
+  note.textContent = `Pattern ${L.name} is using “${PRESETS[L.pattern].name}”. Drawing here switches it to your drawing.`;
+  if (refreshEdLayerSeg) refreshEdLayerSeg();
   showMask();
 }
 function closeEditor() { $('#editor').hidden = true; edDrag = null; }
 function edMask() { return layers[ed.layer].mask; }
+function copyDrawing(from, to) {
+  const A = layers[from], B = layers[to];
+  pushUndo(to);
+  const c = B.mask.getContext('2d'); c.clearRect(0, 0, MASK, MASK); c.drawImage(A.mask, 0, 0);
+  B.params.custom = { ...A.params.custom };
+  B.maskVersion++;
+  if (B.pattern !== 'custom') B.pattern = 'custom';
+  buildLayerCard(to); refreshEditor();
+}
 function showMask() {
   const c = edCanvas.getContext('2d');
   c.clearRect(0, 0, MASK, MASK); c.drawImage(edMask(), 0, 0);
 }
 function maskChanged() { layers[ed.layer].maskVersion++; showMask(); }
-function pushUndo() {
-  ed.undo.push(edMask().getContext('2d').getImageData(0, 0, MASK, MASK));
-  if (ed.undo.length > 30) ed.undo.shift();
+// Every edit goes through pushUndo, so this is also where a previewed preset layer becomes a drawing.
+function pushUndo(i = ed.layer) {
+  const stack = ed.undo[i];
+  stack.push(layers[i].mask.getContext('2d').getImageData(0, 0, MASK, MASK));
+  if (stack.length > 30) stack.shift();
+  if (i === ed.layer && layers[i].pattern !== 'custom') { ensureCustom(i); refreshEditor(); }
 }
 function undo() {
-  const img = ed.undo.pop(); if (!img) return;
+  const img = ed.undo[ed.layer].pop(); if (!img) return;
   edMask().getContext('2d').putImageData(img, 0, 0); maskChanged();
 }
 
@@ -1093,6 +1312,9 @@ edCanvas.addEventListener('pointerup', edEnd);
 edCanvas.addEventListener('pointercancel', edEnd);
 
 function buildEditor() {
+  refreshEdLayerSeg = seg($('#edLayerSeg'), [['0', 'A'], ['1', 'B']], () => ed.layer, v => openEditor(+v, false));
+  $('#edCopyAB').onclick = () => copyDrawing(0, 1);
+  $('#edCopyBA').onclick = () => copyDrawing(1, 0);
   seg($('#edToolSeg'), [['pen', '✎ Pen'], ['line', '╱ Line'], ['rect', '▭ Rect'], ['ellipse', '◯ Ellipse']], () => ed.tool, v => { ed.tool = v; });
   $('#edSliders').append(slider(P('size', 'Brush size', 1, 128, 1, 24, 'px'), () => ed.size, v => { ed.size = v; }).el);
   $('#edClose').onclick = closeEditor;
@@ -1111,25 +1333,59 @@ function buildEditor() {
 }
 
 /* ------------------------------------------------------------------ *
+ * Recipes: ready-made setups. Anything not listed is reset to its default.
+ * ------------------------------------------------------------------ */
+const RECIPES = {
+  rings: { name: 'Drifting rings (classic)', a: ['circles', {}, '#0f172a'], b: ['circles', {}, '#e11d48', { x: 40 }], anim: ['orbit', {}] },
+  beats: { name: 'Line beats', a: ['lines', { spacing: 8 }, '#111111'], b: ['lines', { spacing: 8 }, '#111111', { rot: 3 }], anim: ['sway', { amp: 4, period: 10 }] },
+  glass: { name: 'Glass swirl', a: ['noise', {}, '#111111'], b: ['noise', {}, '#2563eb', {}, 0.8], anim: ['sway', { amp: 5, period: 14 }] },
+  zone: { name: 'Zone plates', a: ['zone', {}, '#111111'], b: ['zone', {}, '#111111', { x: 60 }], anim: ['orbit', { radius: 80, period: 14 }] },
+  star: { name: 'Scanimation: spinning star', a: ['scan', { subject: 'star' }, '#7c3aed'], b: ['scanBar', {}, '#000000'], anim: ['drift', { speed: 40 }] },
+  ball: { name: 'Scanimation: bouncing ball', a: ['scan', { subject: 'ball' }, '#ea580c'], b: ['scanBar', {}, '#000000'], anim: ['drift', { speed: 40 }] },
+  heart: { name: 'Scanimation: beating heart', a: ['scan', { subject: 'pulse', frames: 5 }, '#e11d48'], b: ['scanBar', { frames: 5 }, '#000000'], anim: ['drift', { speed: 30 }] },
+  wave: { name: 'Scanimation: travelling wave', a: ['scan', { subject: 'wave' }, '#0891b2'], b: ['scanBar', {}, '#000000'], anim: ['drift', { speed: 40 }] },
+  ripple: { name: 'Radial scanimation: ripples', a: ['scanR', { subject: 'ripple' }, '#2563eb'], b: ['scanBarR', {}, '#000000'], anim: ['spin', { rate: 16 }] },
+  pinwheel: { name: 'Radial scanimation: pinwheel', a: ['scanR', { subject: 'pinwheel' }, '#16a34a'], b: ['scanBarR', {}, '#000000'], anim: ['spin', { rate: 16 }] },
+  moons: { name: 'Radial scanimation: circling dots', a: ['scanR', { subject: 'dots' }, '#c026d3'], b: ['scanBarR', {}, '#000000'], anim: ['spin', { rate: 16 }] },
+};
+
+function applyRecipe(key) {
+  const r = RECIPES[key]; if (!r) return;
+  [r.a, r.b].forEach(([pattern, params, color, pose = {}, opacity = 1], i) => {
+    const L = layers[i];
+    L.pattern = pattern; L.color = color; L.opacity = opacity; L.visible = true;
+    L.params[pattern] = { ...Object.fromEntries(PRESETS[pattern].params.map(d => [d.k, d.def])), ...params };
+    L.base = { x: 0, y: 0, rot: 0, scale: 1, ...pose };
+  });
+  Object.assign(state, { bg: '#ffffff', blend: 'source-over', moving: 1, order: [0, 1] });
+  anim.counter = false; $('#counter').checked = false;
+  anim.params[r.anim[0]] = { ...Object.fromEntries(ANIMS[r.anim[0]].params.map(d => [d.k, d.def])), ...r.anim[1] };
+  $('#bg').value = state.bg; $('#blend').value = state.blend;
+  buildLayerCard(0); buildLayerCard(1); updateSwapLabel(); refreshMovingSeg(); buildMotionSliders();
+  setAnimMode(r.anim[0]);
+  if (!$('#editor').hidden) refreshEditor();
+}
+
+/* ------------------------------------------------------------------ *
  * Global controls & keyboard
  * ------------------------------------------------------------------ */
+function updateSwapLabel() { $('#swap').textContent = `⇅ Put ${layers[state.order[0]].name} on top`; }
 function togglePanel() { $('#panel').classList.toggle('hidden'); }
 
 function wireGlobal() {
+  const rs = $('#recipe');
+  rs.append(h('option', { value: '' }, 'Choose…'), ...Object.entries(RECIPES).map(([k, r]) => h('option', { value: k }, r.name)));
+  rs.onchange = () => { applyRecipe(rs.value); rs.value = ''; rs.blur(); };
   const bg = $('#bg'); bg.value = state.bg; bg.oninput = () => { state.bg = bg.value; };
   const blend = $('#blend'); blend.value = state.blend; blend.onchange = () => { state.blend = blend.value; };
   $('#swap').onclick = () => {
-    const [a, b] = layers;
-    for (const k of ['pattern', 'color', 'opacity', 'visible', 'params', 'base', 'mask', 'maskVersion']) [a[k], b[k]] = [b[k], a[k]];
-    state.moving = 1 - state.moving;
-    invalidate(); ed.undo = [];
-    buildLayerCard(0); buildLayerCard(1); refreshMovingSeg(); buildMotionSliders();
-    if (!$('#editor').hidden) showMask();
+    state.order.reverse(); compKey = '';
+    buildLayerCard(0); buildLayerCard(1); updateSwapLabel();
   };
   $('#resetPose').onclick = () => { Object.assign(moving().base, { x: 0, y: 0, rot: 0, scale: 1 }); refreshMotion(); };
   $('#counter').onchange = e => { anim.counter = e.target.checked; };
   $('#play').onclick = $('#fabPlay').onclick = () => setPlaying(!anim.playing);
-  $('#restart').onclick = () => { anim.time = 0; };
+  $('#restart').onclick = () => { anim.clock = newClock(); };
   $('#fabPanel').onclick = togglePanel;
   $('#guides').onchange = e => { state.guides = e.target.checked; };
   $('#snapshot').onclick = () => stage.toBlob(blob => {
@@ -1173,7 +1429,7 @@ function wireGlobal() {
 layers[1].base.x = 40;
 resize();
 buildLayerCard(0); buildLayerCard(1);
-buildMotion(); buildAnim(); buildEditor(); wireGlobal();
+buildMotion(); buildAnim(); buildEditor(); wireGlobal(); updateSwapLabel();
 setPlaying(anim.playing);
 requestAnimationFrame(frame);
 </script>
