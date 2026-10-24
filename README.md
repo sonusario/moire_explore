@@ -43,6 +43,14 @@ Rotation, scale and offset can also be typed in exactly.
   - *Keyframes*: set rotation angles at points along the lap; angles in between are interpolated.
 - **Counter-move:** the other layer makes the opposite movement.
 
+## On a phone
+
+The controls sit in a bottom sheet. Tap or drag its handle to switch between a small strip (title and recipes), half the screen, or nearly full screen. Only one section opens at a time. The **A/B** button at the top right switches which layer your finger moves. Use two fingers to rotate and scale.
+
+## About
+
+**About**, at the bottom of the controls, links to this repository and the [portfolio](https://sonusario.github.io/), and lists a one-line change log.
+
 ## Keyboard
 
 `Space` play/pause · `H` hide panel · `G` guides · `1`/`2` pick layer · `M`/`R`/`P` move/rotate/path tool · `[` `]` rotate (Shift = fine) · arrows move (Shift = ×10) · `+`/`-` scale · `0` reset · `Esc` close editor · `Ctrl+Z` undo in the editor.
