@@ -251,6 +251,8 @@
   <ul id="changelog"></ul>
 </dialog>
 
+<input type="file" id="vidFile" accept="video/*" hidden>
+
 <div id="editor" hidden>
   <header><strong>Draw pattern</strong><div class="seg" id="edLayerSeg"></div><button id="edClose" title="Close (Esc)">✕</button></header>
   <p class="hint" id="edNote" hidden></p>
@@ -385,6 +387,168 @@ const RSUBJECTS = {
 
 const P = (k, label, min, max, step, def, unit = '') => ({ k, label, min, max, step, def, unit });
 const weightP = (def = 50) => P('weight', 'Line weight', 5, 95, 1, def, '%');
+
+/* ------------------------------------------------------------------ *
+ * Video scanimations: frames sampled from a video the user loads become the subject of a
+ * Scanimation frames (linear) or Radial scanimation frames layer. Grabbing frames is async
+ * (seek, then draw), so videoFrames(p) returns null and queues a grab until they are ready;
+ * vid.version changes when they arrive so the layer redraws.
+ * ------------------------------------------------------------------ */
+const isVideo = p => p.subject === 'video';
+// Params shared by both kinds; `when` hides a control unless it applies.
+const videoParams = size => [
+  { ...size, when: isVideo },
+  { k: 'look', label: 'Look', type: 'select', def: 'dark', when: isVideo,
+    options: [['dark', 'Silhouette of dark parts'], ['light', 'Silhouette of light parts'], ['shade', 'Shading'], ['colour', 'Original colours']] },
+  { ...P('thresh', 'Threshold', 1, 99, 1, 50, '%'), when: p => isVideo(p) && p.look !== 'colour' },
+  { ...P('start', 'Clip start', 0, 100, 0.1, 0, '%'), when: isVideo },
+  { ...P('end', 'Clip end', 0, 100, 0.1, 100, '%'), when: isVideo },
+  { k: 'loop', label: 'Loop', type: 'select', def: 'wrap', when: isVideo,
+    options: [['wrap', 'Wrap around (looping clips)'], ['bounce', 'Bounce (forward, then back)']] },
+];
+
+const GRAB = 800;   // longest side of a grabbed frame, px
+const vid = { el: null, id: 0, name: '', dur: 0, w: 16, h: 9, otsu: 50, loading: false, error: '', target: 0,
+              grab: null, frames: new Map(), inks: new Map(), want: new Map(), busy: false, version: 0 };
+
+function cacheGet(map, key) { const v = map.get(key); if (v) { map.delete(key); map.set(key, v); } return v; }
+function cachePut(map, key, v, max) { map.delete(key); map.set(key, v); while (map.size > max) map.delete(map.keys().next().value); return v; }
+
+const waitFor = (el, ev, ms = 8000) => new Promise((res, rej) => {
+  const t = setTimeout(() => done(rej, new Error(ev + ' timed out')), ms);
+  const ok = () => done(res), bad = () => done(rej, new Error('media error'));
+  function done(f, v) { clearTimeout(t); el.removeEventListener(ev, ok); el.removeEventListener('error', bad); f(v); }
+  el.addEventListener(ev, ok); el.addEventListener('error', bad);
+});
+async function seekTo(v, t) { const p = waitFor(v, 'seeked'); v.currentTime = t; await p; }
+
+function grabFrame() {
+  const c = vid.grab, g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(vid.el, 0, 0, c.width, c.height);
+  return g.getImageData(0, 0, c.width, c.height);
+}
+
+const lum8 = (d, i) => (d[i] * 54 + d[i + 1] * 183 + d[i + 2] * 19) >> 8;
+// Otsu's method: the grey level that best splits the frame into dark and light, as a percentage.
+function otsu(img) {
+  const hist = new Float64Array(256), d = img.data, n = d.length / 4;
+  for (let i = 0; i < d.length; i += 4) hist[lum8(d, i)]++;
+  let sum = 0; for (let i = 0; i < 256; i++) sum += i * hist[i];
+  let wB = 0, sumB = 0, best = 128, bestVar = -1;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t]; sumB += t * hist[t];
+    if (!wB || wB === n) continue;
+    const mB = sumB / wB, mF = (sum - sumB) / (n - wB), v = wB * (n - wB) * (mB - mF) ** 2;
+    if (v > bestVar) { bestVar = v; best = (mB + mF) / 2; }   // halfway between the two classes, not at the edge of one
+  }
+  return clamp(Math.round(best / 255 * 100), 1, 99);
+}
+
+async function loadVideo(file) {
+  Object.assign(vid, { el: null, loading: true, error: '', name: file.name });
+  vid.id++; vid.frames.clear(); vid.inks.clear(); vid.want.clear();
+  refreshVideoUI();
+  const v = document.createElement('video');
+  v.muted = true; v.playsInline = true; v.preload = 'auto';
+  try {
+    const ready = waitFor(v, 'loadeddata', 20000);
+    v.src = URL.createObjectURL(file);
+    await ready;
+    if (!isFinite(v.duration)) await seekTo(v, 1e7);   // some WebM files only learn their length by seeking to the end
+    if (!v.videoWidth || !isFinite(v.duration) || !v.duration) throw new Error('no picture');
+    const k = Math.min(1, GRAB / Math.max(v.videoWidth, v.videoHeight));
+    vid.grab = Object.assign(document.createElement('canvas'), { width: Math.round(v.videoWidth * k), height: Math.round(v.videoHeight * k) });
+    Object.assign(vid, { el: v, dur: v.duration, w: vid.grab.width, h: vid.grab.height });
+    await seekTo(v, v.duration / 2);
+    vid.otsu = otsu(grabFrame());
+  } catch (e) {
+    vid.el = null;
+    vid.error = `Couldn't open “${file.name}”. Try an MP4 or WebM video.`;
+  }
+  vid.loading = false; vid.version++;
+  refreshVideoUI();
+  return !!vid.el;
+}
+
+// Which moments of the clip become frames, in the order they are interlaced. "Wrap" spreads N
+// frames evenly across the clip (the last one leads back to the first); "Bounce" plays a shorter
+// run forward and then back, so a clip that doesn't loop still cycles smoothly.
+function frameSpec(p) {
+  const N = Math.round(p.frames), d = vid.dur;
+  const a = clamp(Math.min(p.start, p.end), 0, 100) / 100 * d;
+  const b = Math.max(clamp(Math.max(p.start, p.end), 0, 100) / 100 * d, Math.min(d, a + 0.05));
+  let times, order, step;
+  if (p.loop === 'bounce') {
+    const M = Math.floor(N / 2) + 1;
+    step = (b - a) / (M - 1);
+    times = Array.from({ length: M }, (_, j) => a + j * step);
+    order = [...times.keys(), ...[...times.keys()].slice(1, -1).reverse()];
+    while (order.length < N) order.splice(M, 0, M - 1);   // odd N: hold the last frame once
+  } else {
+    step = (b - a) / N;
+    times = Array.from({ length: N }, (_, k) => a + (k + 0.5) * step);
+    order = [...times.keys()];
+  }
+  times = times.map(t => Math.min(t, d - 0.001));
+  return { id: vid.id, a, b, times, order, step, key: `${vid.id}|${times.map(t => t.toFixed(3))}` };
+}
+
+// Turn a grabbed frame into what the layer draws: an alpha mask (coloured later with the
+// layer colour) for the silhouette and shading looks, or the frame itself.
+function toInk(img, look, th) {
+  const c = Object.assign(document.createElement('canvas'), { width: img.width, height: img.height });
+  let out = img;
+  if (look !== 'colour') {
+    out = new ImageData(img.width, img.height);
+    const s = img.data, d = out.data;
+    for (let i = 0; i < s.length; i += 4) {
+      const l = lum8(s, i) / 255;
+      d[i + 3] = 255 * (look === 'shade' ? clamp(1 - l / (2 * th), 0, 1)
+                      : clamp(0.5 + (look === 'light' ? l - th : th - l) * 25, 0, 1));
+    }
+  }
+  c.getContext('2d').putImageData(out, 0, 0);
+  return c;
+}
+
+function videoFrames(p) {
+  if (!vid.el) return null;
+  const spec = frameSpec(p), imgs = cacheGet(vid.frames, spec.key);
+  if (!imgs) {
+    const w = vid.want.get(p);
+    if (!w || w.key !== spec.key) vid.want.set(p, spec);
+    pump();
+    return null;
+  }
+  const ik = `${spec.key}|${spec.order}|${p.look}|${p.look === 'colour' ? '' : p.thresh}`;
+  return cacheGet(vid.inks, ik) || cachePut(vid.inks, ik, (u => spec.order.map(j => u[j]))(imgs.map(img => toInk(img, p.look, p.thresh / 100))), 4);
+}
+
+// Grab the frames that layers have asked for, one set at a time. A request that changes
+// mid-grab (say, while dragging Clip start) abandons the old one.
+async function pump() {
+  if (vid.busy) return;
+  vid.busy = true; refreshVideoUI();
+  while (vid.want.size) {
+    const [p, spec] = vid.want.entries().next().value;
+    try {
+      if (spec.id !== vid.id || !vid.el) { vid.want.delete(p); continue; }
+      const imgs = [];
+      for (const t of spec.times) {
+        if (vid.want.get(p) !== spec) break;
+        await seekTo(vid.el, t); imgs.push(grabFrame());
+      }
+      if (vid.want.get(p) !== spec) continue;
+      vid.want.delete(p);
+      cachePut(vid.frames, spec.key, imgs, 3);
+      vid.error = ''; vid.version++;
+    } catch (e) {
+      if (vid.want.get(p) === spec) vid.want.delete(p);
+      if (spec.id === vid.id) vid.error = 'Couldn’t read frames from this video.';
+    }
+  }
+  vid.busy = false; refreshVideoUI();
+}
 
 const PRESETS = {
   lines: {
@@ -538,11 +702,20 @@ const PRESETS = {
   scan: {
     name: 'Scanimation frames',
     group: 'scan',
-    note: 'Interlaced animation frames. Put “Scanimation barrier” with the same Frames and Slit on the other layer, then Drift it sideways.',
-    params: [{ k: 'subject', label: 'Subject', type: 'select', def: 'star', options: Object.entries(SUBJECTS).map(([k, s]) => [k, s.name]) },
-             P('frames', 'Frames', 2, 12, 1, 6), P('slit', 'Slit width', 1, 20, 0.1, 4, 'px'), P('cell', 'Cell size', 40, 600, 1, 160, 'px')],
-    size: p => { const per = Math.round(p.frames) * p.slit, m = Math.max(1, Math.round(p.cell / per)); return [m * per, m * per]; },
+    note: 'Interlaced animation frames. Put “Scanimation barrier” with the same Frames and Slit on the other layer, then Drift it sideways. Pick “Your video…” as the Subject to make one from a clip.',
+    params: [{ k: 'subject', label: 'Subject', type: 'select', def: 'star', options: [...Object.entries(SUBJECTS).map(([k, s]) => [k, s.name]), ['video', 'Your video…']] },
+             P('frames', 'Frames', 2, 12, 1, 6), P('slit', 'Slit width', 1, 20, 0.1, 4, 'px'),
+             { ...P('cell', 'Cell size', 40, 600, 1, 160, 'px'), when: p => !isVideo(p) },
+             { k: 'repeat', label: 'Repeat', type: 'select', def: 'single', when: isVideo, options: [['single', 'Single image'], ['tile', 'Tile across the plane']] },
+             ...videoParams(P('vwidth', 'Image width', 80, 1000, 1, 480, 'px'))],
+    size: p => {
+      const per = Math.round(p.frames) * p.slit, m = Math.max(1, Math.round((isVideo(p) ? p.vwidth : p.cell) / per));
+      return [m * per, isVideo(p) ? m * per * vid.h / vid.w : m * per];   // a video keeps its aspect ratio
+    },
+    single: p => isVideo(p) && p.repeat === 'single',
     drawTile(ctx, Tw, Th, p) {
+      const frames = isVideo(p) && videoFrames(p);
+      if (isVideo(p) && !frames) return;
       // Column boundaries line up with the layer's origin (the tile centre), and the column just
       // right of the origin holds frame 0, so a barrier at the same origin shows frame 0 at rest.
       const N = Math.round(p.frames), cols = Math.round(this.size(p)[0] / p.slit), cw = Tw / cols;
@@ -551,8 +724,12 @@ const PRESETS = {
         ctx.save(); ctx.beginPath();
         for (let c = -1; c <= cols; c++) if (((c - c0) % N + N) % N === k) ctx.rect(off + c * cw, 0, cw, Th);
         ctx.clip();
-        SUBJECTS[p.subject].draw(ctx, Tw / 2, Th / 2, Math.min(Tw, Th), k / N, Tw);
+        if (frames) ctx.drawImage(frames[k], 0, 0, Tw, Th);
+        else SUBJECTS[p.subject].draw(ctx, Tw / 2, Th / 2, Math.min(Tw, Th), k / N, Tw);
         ctx.restore();
+      }
+      if (frames && p.look !== 'colour') {   // masks take the layer colour
+        ctx.globalCompositeOperation = 'source-in'; ctx.fillRect(0, 0, Tw, Th); ctx.globalCompositeOperation = 'source-over';
       }
     },
   },
@@ -572,16 +749,28 @@ const PRESETS = {
   scanR: {
     name: 'Radial scanimation frames',
     group: 'scan',
-    note: 'Frames interlaced by angle. Put “Radial scanimation barrier” with the same Frames and Slits on the other layer, centre both, then Spin it.',
-    params: [{ k: 'subject', label: 'Subject', type: 'select', def: 'ripple', options: Object.entries(RSUBJECTS).map(([k, s]) => [k, s.name]) },
-             P('frames', 'Frames', 2, 12, 1, 6), P('slits', 'Slits', 4, 90, 1, 30), P('size', 'Feature size', 6, 200, 0.5, 36, 'px')],
+    note: 'Frames interlaced by angle. Put “Radial scanimation barrier” with the same Frames and Slits on the other layer, centre both, then Spin it. Pick “Your video…” as the Subject to make one from a clip (it is cropped to a circle).',
+    params: [{ k: 'subject', label: 'Subject', type: 'select', def: 'ripple', options: [...Object.entries(RSUBJECTS).map(([k, s]) => [k, s.name]), ['video', 'Your video…']] },
+             P('frames', 'Frames', 2, 12, 1, 6), P('slits', 'Slits', 4, 90, 1, 30),
+             { ...P('size', 'Feature size', 6, 200, 0.5, 36, 'px'), when: p => !isVideo(p) },
+             ...videoParams(P('vsize', 'Image size', 80, 1200, 1, 480, 'px'))],
     draw(ctx, R, p) {
+      const frames = isVideo(p) && videoFrames(p);
+      if (isVideo(p) && !frames) return;
       const N = Math.round(p.frames), S = N * Math.round(p.slits), a = TAU / S;
+      // A video is cropped to its centre square and drawn as a disc: wedges only make sense round the centre.
+      const D = p.vsize, cs = Math.min(vid.w, vid.h), sx = (vid.w - cs) / 2, sy = (vid.h - cs) / 2;
+      if (frames) { ctx.save(); ctx.beginPath(); ctx.arc(0, 0, D / 2, 0, TAU); ctx.clip(); }
       for (let k = 0; k < N; k++) {
         ctx.save(); ctx.beginPath();
         for (let j = k; j < S; j += N) { ctx.moveTo(0, 0); ctx.arc(0, 0, R, j * a, (j + 1) * a); ctx.closePath(); }
         ctx.clip();
-        RSUBJECTS[p.subject].draw(ctx, R, p.size, k / N);
+        if (frames) ctx.drawImage(frames[k], sx, sy, cs, cs, -D / 2, -D / 2, D, D);
+        else RSUBJECTS[p.subject].draw(ctx, R, p.size, k / N);
+        ctx.restore();
+      }
+      if (frames) {
+        if (p.look !== 'colour') { ctx.globalCompositeOperation = 'source-in'; ctx.fillRect(-D / 2, -D / 2, D, D); ctx.globalCompositeOperation = 'source-over'; }
         ctx.restore();
       }
     },
@@ -681,7 +870,7 @@ const clampPx = v => clamp(Math.round(v), 2, 2048);
 function drawTiled(L, ctx, R, sc, pre, p) {
   const [w, h] = pre.size(p);
   const Tw = clampPx(w * sc * dpr), Th = clampPx(h * sc * dpr);
-  const key = JSON.stringify([L.pattern, p, L.color, Tw, Th]);
+  const key = JSON.stringify([L.pattern, p, L.color, Tw, Th, vid.version]);
   if (key !== L.tileKey) {
     L.tile.width = Tw; L.tile.height = Th;
     const t = L.tile.getContext('2d');
@@ -689,6 +878,7 @@ function drawTiled(L, ctx, R, sc, pre, p) {
     pre.drawTile(t, Tw, Th, p);
     L.tileKey = key; L.pattern2d = null;
   }
+  if (pre.single && pre.single(p)) { ctx.imageSmoothingQuality = 'high'; ctx.drawImage(L.tile, -w / 2, -h / 2, w, h); return; }
   fillWithTile(L, ctx, R, w, h, Tw, Th);
 }
 
@@ -733,6 +923,7 @@ function drawCustom(L, ctx, R, sc, p) {
 function periodOf(L) {
   const pre = PRESETS[L.pattern], p = L.params[L.pattern];
   if (pre.custom) return p.mode === 'tile' ? [p.size, p.size] : null;
+  if (pre.single && pre.single(p)) return null;
   if (pre.period) return pre.period(p);
   if (pre.size) return pre.size(p);
   return null;
@@ -947,7 +1138,7 @@ function frame(now) {
   let changed = false;
   layers.forEach((L, i) => {
     const t = T[i];
-    const key = JSON.stringify([t.x, t.y, t.rot, t.scale, L.pattern, L.params[L.pattern], L.color, L.visible, L.maskVersion, W, H, dpr]);
+    const key = JSON.stringify([t.x, t.y, t.rot, t.scale, L.pattern, L.params[L.pattern], L.color, L.visible, L.maskVersion, vid.version, W, H, dpr]);
     if (key !== L.renderKey) { renderLayer(L, t); L.renderKey = key; changed = true; }
   });
   const ck = JSON.stringify([state.bg, state.blend, state.order, layers.map(l => [l.opacity, l.visible])]);
@@ -1018,7 +1209,17 @@ function buildLayerCard(i) {
   const rebuildParams = () => {
     paramsBox.innerHTML = '';
     const pre = PRESETS[L.pattern];
-    for (const d of pre.params) paramsBox.append(paramControl(d, L.params[L.pattern], () => syncScan(i)));
+    const p = L.params[L.pattern];
+    for (const d of pre.params) {
+      if (d.when && !d.when(p)) continue;
+      paramsBox.append(paramControl(d, p, () => {
+        syncScan(i);
+        if (d.type === 'select') rebuildParams();   // a choice can show or hide other controls
+        if (d.k === 'subject' && isVideo(p) && !vid.el && !vid.loading) pickVideo(i);
+        refreshVideoUI();
+      }));
+    }
+    if (isVideo(p)) paramsBox.append(videoControls(i));
     if (pre.note) paramsBox.append(h('p', { class: 'hint' }, pre.note));
   };
   sel.addEventListener('change', () => {
@@ -1055,6 +1256,95 @@ function syncScan(i) {
   if (pair[1].every(k => dst[k] === src[k])) return;
   pair[1].forEach(k => { dst[k] = src[k]; });
   buildLayerCard(1 - i);
+}
+
+/* ------------------------------------------------------------------ *
+ * Video controls (in a frames layer whose Subject is "Your video…")
+ * ------------------------------------------------------------------ */
+function videoControls(i) {
+  return h('div', {},
+    h('div', { class: 'btns' },
+      h('button', { type: 'button', onclick: () => pickVideo(i) }, '🎞 Load video…'),
+      h('button', { type: 'button', class: 'vidSpeed', disabled: !vid.el, onclick: () => matchVideoSpeed(i),
+        title: 'Set the Drift speed (or Spin rate) so the clip plays back at its real speed' }, '⏱ Real-time speed')),
+    h('p', { class: 'hint vidStatus', 'data-layer': i }, videoStatus(i)));
+}
+
+function videoStatus(i) {
+  if (vid.loading) return `Opening “${vid.name}”…`;
+  if (vid.error) return vid.error;
+  if (!vid.el) return 'No video yet. Load one, or drop a video file anywhere on the page.';
+  const L = layers[i], p = L.params[L.pattern];
+  if (!isVideo(p)) return '';
+  const s = frameSpec(p), f = v => v.toFixed(1);
+  return `${vid.name} (${f(vid.dur)} s): ${f(s.a)}–${f(s.b)} s as ${s.order.length} frames, ${f(1 / s.step)} fps` +
+    (vid.want.has(p) ? ' · sampling…' : '.');
+}
+
+function refreshVideoUI() {
+  document.querySelectorAll('.vidStatus').forEach(el => { el.textContent = videoStatus(+el.dataset.layer); });
+  document.querySelectorAll('.vidSpeed').forEach(b => { b.disabled = !vid.el; });
+}
+
+function pickVideo(i) {
+  vid.target = i;
+  const f = $('#vidFile'); f.value = ''; f.click();
+}
+
+// Speed at which one frame passes per video frame interval: a linear barrier moves one slit,
+// a radial one turns one wedge. Sign follows which layer moves (the barrier, normally).
+function matchVideoSpeed(i) {
+  const L = layers[i], p = L.params[L.pattern];
+  if (!vid.el || !isVideo(p)) return;
+  const fps = 1 / frameSpec(p).step, sign = state.moving === i ? -1 : 1;
+  if (L.pattern === 'scanR') {
+    anim.params.spin.rate = clamp(+(sign * 360 / (Math.round(p.frames) * Math.round(p.slits)) * fps).toFixed(2), -30, 30);
+    setAnimMode('spin');
+  } else {
+    Object.assign(anim.params.drift, { speed: clamp(+(sign * p.slit * fps).toFixed(1), -200, 200), dir: 0 });
+    setAnimMode('drift');
+  }
+}
+
+// Turn the loaded video into a working scanimation: the matching barrier goes on top of the
+// other layer, lined up with the frames (and centred for the radial kind), and it moves at the
+// clip's real speed. The threshold starts at the level that best splits the clip into dark and light.
+function setupVideoScan(i) {
+  const L = layers[i], O = layers[1 - i], p = L.params[L.pattern], [bar, keys] = SCAN_PAIRS[L.pattern];
+  if (O.pattern !== bar) Object.assign(O, { pattern: bar, color: '#000000', visible: true, opacity: 1 });
+  keys.forEach(k => { O.params[bar][k] = p[k]; });
+  p.thresh = vid.otsu;
+  if (L.pattern === 'scanR') { L.base.x = L.base.y = 0; O.base.x = O.base.y = 0; }
+  Object.assign(O.base, { rot: L.base.rot, scale: L.base.scale });
+  state.order = [i, 1 - i];
+  buildLayerCard(0); buildLayerCard(1); updateSwapLabel();
+  setMoving(1 - i);
+  matchVideoSpeed(i);
+  if (!$('#editor').hidden) refreshEditor();
+}
+
+async function loadVideoInto(i, file) {
+  const L = layers[i];
+  if (L.pattern !== 'scan' && L.pattern !== 'scanR') L.pattern = 'scan';
+  L.params[L.pattern].subject = 'video';
+  buildLayerCard(i);
+  if (await loadVideo(file)) setupVideoScan(i);
+}
+
+function wireVideo() {
+  const f = $('#vidFile');
+  f.onchange = () => { if (f.files[0]) loadVideoInto(vid.target, f.files[0]); };
+  // Drop a video anywhere: it goes to the layer already showing a video (or any frames layer, or A).
+  addEventListener('dragover', e => { if (e.dataTransfer.types.includes('Files')) e.preventDefault(); });
+  addEventListener('drop', e => {
+    if (!e.dataTransfer.files.length) return;
+    e.preventDefault();
+    const file = [...e.dataTransfer.files].find(x => x.type.startsWith('video/'));
+    if (!file) return;
+    const frames = [0, 1].filter(j => layers[j].pattern === 'scan' || layers[j].pattern === 'scanR');
+    const i = frames.find(j => isVideo(layers[j].params[layers[j].pattern])) ?? frames[0] ?? 0;
+    loadVideoInto(i, file);
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -1429,6 +1719,8 @@ const RECIPES = {
   ripple: { name: 'Radial scanimation: ripples', a: ['scanR', { subject: 'ripple' }, '#2563eb'], b: ['scanBarR', {}, '#000000'], anim: ['spin', { rate: 16 }] },
   pinwheel: { name: 'Radial scanimation: pinwheel', a: ['scanR', { subject: 'pinwheel' }, '#16a34a'], b: ['scanBarR', {}, '#000000'], anim: ['spin', { rate: 16 }] },
   moons: { name: 'Radial scanimation: circling dots', a: ['scanR', { subject: 'dots' }, '#c026d3'], b: ['scanBarR', {}, '#000000'], anim: ['spin', { rate: 16 }] },
+  videoLin: { name: 'Your video: scanimation (slides)', video: true, a: ['scan', { subject: 'video', slit: 3 }, '#1e1b4b'], b: ['scanBar', { slit: 3 }, '#000000'], anim: ['drift', {}] },
+  videoRad: { name: 'Your video: radial scanimation (spins)', video: true, a: ['scanR', { subject: 'video', slits: 45 }, '#1e1b4b'], b: ['scanBarR', { slits: 45 }, '#000000'], anim: ['spin', {}] },
 };
 
 function applyRecipe(key) {
@@ -1506,6 +1798,7 @@ function wireSheet() {
  * About: links and a one-line-per-release changelog (newest first).
  * ------------------------------------------------------------------ */
 const CHANGELOG = [
+  ['2026-10-29', 'Turn your own video into a scanimation: sampled frames, looks and timing adapt to the linear or radial kind.'],
   ['2026-10-24', 'Friendlier on phones (resizable bottom sheet, bigger controls, no stretched canvas) and this About panel.'],
   ['2026-10-24', 'Scanimation patterns, Drift animation, recipes; drawing editor A/B switch and copy; smooth rate changes; Swap only changes stacking; Normal blend by default.'],
   ['2026-10-22', 'Custom tab icon.'],
@@ -1526,7 +1819,11 @@ function togglePanel() { $('#panel').classList.toggle('hidden'); }
 function wireGlobal() {
   const rs = $('#recipe');
   rs.append(h('option', { value: '' }, 'Choose…'), ...Object.entries(RECIPES).map(([k, r]) => h('option', { value: k }, r.name)));
-  rs.onchange = () => { applyRecipe(rs.value); rs.value = ''; rs.blur(); };
+  rs.onchange = () => {
+    const r = RECIPES[rs.value];
+    applyRecipe(rs.value); rs.value = ''; rs.blur();
+    if (r && r.video) { if (vid.el) setupVideoScan(0); else pickVideo(0); }
+  };
   const bg = $('#bg'); bg.value = state.bg; bg.oninput = () => { state.bg = bg.value; };
   const blend = $('#blend'); blend.value = state.blend; blend.onchange = () => { state.blend = blend.value; };
   $('#swap').onclick = () => {
@@ -1582,7 +1879,7 @@ function wireGlobal() {
 layers[1].base.x = 40;
 resize();
 buildLayerCard(0); buildLayerCard(1);
-buildMotion(); buildAnim(); buildEditor(); wireGlobal(); updateSwapLabel(); wireSheet(); wireAbout();
+buildMotion(); buildAnim(); buildEditor(); wireGlobal(); updateSwapLabel(); wireSheet(); wireAbout(); wireVideo();
 setMoving(state.moving);
 setPlaying(anim.playing);
 requestAnimationFrame(frame);
